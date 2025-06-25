@@ -501,22 +501,18 @@ var _ = Describe("BackupSchedule controller", func() {
 				return false
 			}, timeout, interval).Should(BeTrue())
 
-			rhacmBackupSchedule := *createBackupSchedule(backupScheduleName, veleroNamespaceName).
-				schedule(backupSchedule).veleroTTL(metav1.Duration{Duration: defaultVeleroTTL}).
-				useManagedServiceAccount(true).
-				managedServiceAccountTTL(metav1.Duration{Duration: msaTTL}).
-				setVolumeSnapshotLocation([]string{"dpa-1"}).
-				useOwnerReferencesInBackup(true).
-				skipImmediately(true).
-				object
+			rhacmBackupSchedule := *createBackupScheduleWithDefaults(
+				backupScheduleName,
+				veleroNamespaceName,
+				backupSchedule,
+				metav1.Duration{Duration: defaultVeleroTTL},
+				metav1.Duration{Duration: msaTTL},
+			)
 			Expect(k8sClient.Create(ctx, &rhacmBackupSchedule)).Should(Succeed())
 
 			backupLookupKey := createLookupKey(backupScheduleName, veleroNamespaceName)
 			createdBackupSchedule := v1beta1.BackupSchedule{}
-			Eventually(func() bool {
-				err := k8sClient.Get(ctx, backupLookupKey, &createdBackupSchedule)
-				return err == nil
-			}, timeout, interval).Should(BeTrue())
+			waitForObjectCreation(ctx, k8sClient, backupLookupKey, &createdBackupSchedule, timeout, interval)
 
 			// validate baremetal secret has backup annotation
 			baremetalSecret := corev1.Secret{}
@@ -789,10 +785,7 @@ var _ = Describe("BackupSchedule controller", func() {
 
 			backupLookupKeyNoTTL := createLookupKey(backupScheduleNameNoTTL, veleroNamespaceName)
 			createdBackupScheduleNoTTL := v1beta1.BackupSchedule{}
-			Eventually(func() bool {
-				err := k8sClient.Get(ctx, backupLookupKeyNoTTL, &createdBackupScheduleNoTTL)
-				return err == nil
-			}, timeout, interval).Should(BeTrue())
+			waitForObjectCreation(ctx, k8sClient, backupLookupKeyNoTTL, &createdBackupScheduleNoTTL, timeout, interval)
 
 			Expect(createdBackupScheduleNoTTL.CreationTimestamp.Time).NotTo(BeNil())
 
@@ -815,11 +808,7 @@ var _ = Describe("BackupSchedule controller", func() {
 					createdBackupScheduleNoTTL.Status.VeleroScheduleManagedClusters != nil &&
 					createdBackupScheduleNoTTL.Status.VeleroScheduleResources != nil
 			}, timeout, interval).ShouldNot(BeTrue())
-			Eventually(func() v1beta1.SchedulePhase {
-				err := k8sClient.Get(ctx, backupLookupKeyNoTTL, &createdBackupScheduleNoTTL)
-				Expect(err).NotTo(HaveOccurred())
-				return createdBackupScheduleNoTTL.Status.Phase
-			}, timeout, interval).Should(BeEquivalentTo(v1beta1.SchedulePhaseFailed))
+			waitForSchedulePhase(ctx, k8sClient, backupScheduleNameNoTTL, veleroNamespaceName, v1beta1.SchedulePhaseFailed, timeout, interval)
 			Expect(
 				createdBackupScheduleNoTTL.Status.LastMessage,
 			).Should(ContainSubstring("already exists"))
@@ -833,10 +822,7 @@ var _ = Describe("BackupSchedule controller", func() {
 
 			backupLookupKeyACM := createLookupKey(acmBackupName, acmNamespaceName)
 			createdBackupScheduleACM := v1beta1.BackupSchedule{}
-			Eventually(func() bool {
-				err := k8sClient.Get(ctx, backupLookupKeyACM, &createdBackupScheduleACM)
-				return err == nil
-			}, timeout, interval).Should(BeTrue())
+			waitForObjectCreation(ctx, k8sClient, backupLookupKeyACM, &createdBackupScheduleACM, timeout, interval)
 
 			By(
 				"backup schedule in acm ns should be in failed validation status - since it must be in the velero ns",
@@ -862,14 +848,7 @@ var _ = Describe("BackupSchedule controller", func() {
 
 			backupLookupKeyInvalidCronExp := createLookupKey(invalidCronExpBackupName, veleroNamespaceName)
 			createdBackupScheduleInvalidCronExp := v1beta1.BackupSchedule{}
-			Eventually(func() bool {
-				err := k8sClient.Get(
-					ctx,
-					backupLookupKeyInvalidCronExp,
-					&createdBackupScheduleInvalidCronExp,
-				)
-				return err == nil
-			}, timeout, interval).Should(BeTrue())
+			waitForObjectCreation(ctx, k8sClient, backupLookupKeyInvalidCronExp, &createdBackupScheduleInvalidCronExp, timeout, interval)
 
 			By(
 				"backup schedule with invalid cron exp should be in failed validation status",
@@ -898,14 +877,7 @@ var _ = Describe("BackupSchedule controller", func() {
 			}, timeout, interval).Should(BeTrue())
 
 			createdBackupScheduleValidCronExp := v1beta1.BackupSchedule{}
-			Eventually(func() bool {
-				err := k8sClient.Get(
-					ctx,
-					backupLookupKeyInvalidCronExp,
-					&createdBackupScheduleValidCronExp,
-				)
-				return err == nil
-			}, timeout, interval).Should(BeTrue())
+			waitForObjectCreation(ctx, k8sClient, backupLookupKeyInvalidCronExp, &createdBackupScheduleValidCronExp, timeout, interval)
 
 			By(
 				"backup schedule now with valid cron exp should pass cron exp validation",
@@ -1048,12 +1020,11 @@ var _ = Describe("BackupSchedule controller", func() {
 					return len(veleroSchedules.Items) == 0
 				}, timeout, interval).Should(BeTrue())
 				createdSchedule := v1beta1.BackupSchedule{}
-				Eventually(func() v1beta1.SchedulePhase {
-					scheduleLookupKey := createLookupKey(backupScheduleName+"-new", newVeleroNamespace)
-					err := k8sClient.Get(ctx, scheduleLookupKey, &createdSchedule)
-					Expect(err).NotTo(HaveOccurred())
-					return createdSchedule.Status.Phase
-				}, timeout, interval).Should(BeEquivalentTo(v1beta1.SchedulePhaseFailedValidation))
+				waitForSchedulePhase(ctx, k8sClient, backupScheduleName+"-new", newVeleroNamespace, v1beta1.SchedulePhaseFailedValidation, timeout, interval)
+				// Get the schedule to check the status message
+				Eventually(func() error {
+					return k8sClient.Get(ctx, createLookupKey(backupScheduleName+"-new", newVeleroNamespace), &createdSchedule)
+				}, timeout, interval).Should(Succeed())
 				Expect(
 					createdSchedule.Status.LastMessage,
 				).Should(BeIdenticalTo("velero.io.BackupStorageLocation resources not found. " +
@@ -1075,13 +1046,11 @@ var _ = Describe("BackupSchedule controller", func() {
 					object
 				Expect(k8sClient.Create(ctx, &rhacmBackupScheduleNew)).Should(Succeed())
 				createdScheduleNew := v1beta1.BackupSchedule{}
-				Eventually(func() v1beta1.SchedulePhase {
-					scheduleLookupKey := createLookupKey(backupScheduleName+"-new-1", newVeleroNamespace)
-					err := k8sClient.Get(ctx, scheduleLookupKey, &createdScheduleNew)
-					Expect(err).NotTo(HaveOccurred())
-					return createdScheduleNew.Status.Phase
-				}, timeout, interval).Should(BeEquivalentTo(v1beta1.SchedulePhaseFailedValidation))
-
+				waitForSchedulePhase(ctx, k8sClient, backupScheduleName+"-new-1", newVeleroNamespace, v1beta1.SchedulePhaseFailedValidation, timeout, interval)
+				// Get the schedule to check the status message
+				Eventually(func() error {
+					return k8sClient.Get(ctx, createLookupKey(backupScheduleName+"-new-1", newVeleroNamespace), &createdScheduleNew)
+				}, timeout, interval).Should(Succeed())
 				Expect(
 					createdScheduleNew.Status.LastMessage,
 				).Should(BeIdenticalTo("Backup storage location is not available. " +

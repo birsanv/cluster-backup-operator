@@ -1089,3 +1089,77 @@ func createAndVerifyResources(ctx context.Context, k8sClient client.Client, reso
 		Expect(k8sClient.Create(ctx, resources[i])).Should(Succeed())
 	}
 }
+
+// waitForObjectCreation waits for a Kubernetes object to be successfully created and retrievable
+func waitForObjectCreation(
+	ctx context.Context,
+	k8sClient client.Client,
+	objectKey client.ObjectKey,
+	obj client.Object,
+	timeout, interval time.Duration,
+) {
+	Eventually(func() bool {
+		err := k8sClient.Get(ctx, objectKey, obj)
+		return err == nil
+	}, timeout, interval).Should(BeTrue())
+}
+
+// waitForObjectCreationAndGet waits for object creation and ensures the object is populated with current data
+func waitForObjectCreationAndGet(
+	ctx context.Context,
+	k8sClient client.Client,
+	objectKey client.ObjectKey,
+	obj client.Object,
+	timeout, interval time.Duration,
+) {
+	waitForObjectCreation(ctx, k8sClient, objectKey, obj, timeout, interval)
+	// Ensure we have the latest data
+	Eventually(func() error {
+		return k8sClient.Get(ctx, objectKey, obj)
+	}, timeout, interval).Should(Succeed())
+}
+
+// waitForSchedulePhase waits for a BackupSchedule to reach the specified phase
+func waitForSchedulePhase(
+	ctx context.Context,
+	k8sClient client.Client,
+	scheduleName, namespace string,
+	expectedPhase v1beta1.SchedulePhase,
+	timeout, interval time.Duration,
+) {
+	Eventually(func() v1beta1.SchedulePhase {
+		schedule := v1beta1.BackupSchedule{}
+		err := k8sClient.Get(ctx, createLookupKey(scheduleName, namespace), &schedule)
+		if err != nil {
+			return ""
+		}
+		return schedule.Status.Phase
+	}, timeout, interval).Should(BeEquivalentTo(expectedPhase))
+}
+
+// createBackupScheduleWithDefaults creates a BackupSchedule with commonly used default settings
+func createBackupScheduleWithDefaults(name, namespace, cronSchedule string, veleroTTL, msaTTL metav1.Duration) *v1beta1.BackupSchedule {
+	return createBackupSchedule(name, namespace).
+		schedule(cronSchedule).
+		veleroTTL(veleroTTL).
+		useManagedServiceAccount(true).
+		managedServiceAccountTTL(msaTTL).
+		setVolumeSnapshotLocation([]string{"dpa-1"}).
+		useOwnerReferencesInBackup(true).
+		skipImmediately(true).
+		object
+}
+
+// waitForListOperation waits for a list operation to succeed
+func waitForListOperation(
+	ctx context.Context,
+	k8sClient client.Client,
+	list client.ObjectList,
+	timeout, interval time.Duration,
+	opts ...client.ListOption,
+) {
+	Eventually(func() bool {
+		err := k8sClient.List(ctx, list, opts...)
+		return err == nil
+	}, timeout, interval).Should(BeTrue())
+}
