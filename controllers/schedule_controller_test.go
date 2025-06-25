@@ -28,6 +28,53 @@ import (
 var _ = Describe("BackupSchedule controller", func() {
 	logger := zap.New(zap.UseDevMode(true), zap.WriteTo(GinkgoWriter))
 
+	// Test Constants
+	const (
+		// Test timing configuration
+		defaultTimeout  = time.Second * 9        // Maximum wait time for async operations
+		defaultInterval = time.Millisecond * 250 // Polling interval for Eventually/Consistently checks
+		longTimeout     = time.Second * 65       // Extended timeout for complex operations
+
+		// Namespace names
+		defaultVeleroNamespace     = "velero-ns"
+		defaultACMNamespace        = "acm-ns"
+		defaultChartsNamespace     = "acm-channel-ns"
+		defaultManagedClusterNS    = "managed1"
+		defaultClusterPoolNS       = "app"
+		defaultClusterDeploymentNS = "vb-pool-fhbjs"
+		defaultMachineAPINS        = "openshift-machine-api"
+
+		// Schedule configuration
+		defaultBackupScheduleName = "the-backup-schedule-name"
+		defaultCronSchedule       = "0 */6 * * *"
+		invalidCronExpression     = "invalid-cron-exp"
+
+		// TTL values
+		defaultVeleroTTL = time.Hour * 72
+		extendedTTL      = time.Hour * 150
+		reducedTTL       = time.Hour * 50
+		msaTTL           = time.Hour * 90
+		shortTTL         = time.Second * 5
+
+		// Storage location names
+		defaultStorageLocationName = "default"
+		newStorageLocationName     = "default-new"
+
+		// Test data timestamps
+		timestamp1 = "20210910181336"
+		timestamp2 = "20210910181337"
+		timestamp3 = "20210910181338"
+
+		// Secret names
+		poolCredsSecretName      = "app-prow-47-aws-creds"
+		autoImportSecretName     = "auto-import-account"
+		autoImportPairSecretName = "auto-import-account-pair"
+		otherMSASecretName       = "some-other-msa-account"
+		baremetalSecretName      = "baremetal"
+		baremetalAPISecretName   = "baremetal-api-secret"
+		aiSecretName             = "ai-secret"
+	)
+
 	var (
 		ctx                     context.Context
 		managedClusters         []clusterv1.ManagedCluster
@@ -55,27 +102,25 @@ var _ = Describe("BackupSchedule controller", func() {
 		clusterDeploymentNS     *corev1.Namespace
 
 		backupTimestamps = []string{
-			"20210910181336",
-			"20210910181337",
-			"20210910181338",
+			timestamp1,
+			timestamp2,
+			timestamp3,
 		}
 
-		backupScheduleName = "the-backup-schedule-name"
-
-		backupSchedule = "0 */6 * * *"
-
-		timeout  = time.Second * 9
-		interval = time.Millisecond * 250
+		backupScheduleName = defaultBackupScheduleName
+		backupSchedule     = defaultCronSchedule
+		timeout            = defaultTimeout
+		interval           = defaultInterval
 	)
 
 	BeforeEach(func() {
 		ctx = context.Background()
-		veleroNamespaceName = "velero-ns"
-		acmNamespaceName = "acm-ns"
-		chartsv1NSName = "acm-channel-ns"
-		managedClusterNSName = "managed1"
-		clusterPoolNSName = "app"
-		clusterDeploymentNSName = "vb-pool-fhbjs"
+		veleroNamespaceName = defaultVeleroNamespace
+		acmNamespaceName = defaultACMNamespace
+		chartsv1NSName = defaultChartsNamespace
+		managedClusterNSName = defaultManagedClusterNS
+		clusterPoolNSName = defaultClusterPoolNS
+		clusterDeploymentNSName = defaultClusterDeploymentNS
 
 		clusterVersions = []ocinfrav1.ClusterVersion{
 			*createClusterVersion("version", "aaa", nil),
@@ -114,44 +159,44 @@ var _ = Describe("BackupSchedule controller", func() {
 		managedClusterNS = createNamespace(managedClusterNSName)
 		chartsv1NS = createNamespace(chartsv1NSName)
 		clusterPoolNS = createNamespace(clusterPoolNSName)
-		aINS = createNamespace("openshift-machine-api")
+		aINS = createNamespace(defaultMachineAPINS)
 		clusterDeploymentNS = createNamespace(clusterDeploymentNSName)
 		veleroNamespace = createNamespace(veleroNamespaceName)
 		acmNamespace = createNamespace(acmNamespaceName)
 
 		clusterPoolSecrets = []corev1.Secret{
-			*createSecret("app-prow-47-aws-creds", clusterPoolNSName,
+			*createSecret(poolCredsSecretName, clusterPoolNSName,
 				nil, nil, nil),
-			*createSecret("auto-import-account", clusterPoolNSName,
+			*createSecret(autoImportSecretName, clusterPoolNSName,
 				map[string]string{
 					"authentication.open-cluster-management.io/is-managed-serviceaccount": "true",
 				}, map[string]string{
 					"expirationTimestamp":  "2024-08-05T15:25:34Z",
 					"lastRefreshTimestamp": "2022-07-26T15:25:34Z",
 				}, nil),
-			*createSecret("auto-import-account-pair", clusterPoolNSName,
+			*createSecret(autoImportPairSecretName, clusterPoolNSName,
 				map[string]string{
 					"authentication.open-cluster-management.io/is-managed-serviceaccount": "true",
 				}, map[string]string{
 					"expirationTimestamp":  "2024-08-05T15:25:34Z",
 					"lastRefreshTimestamp": "2022-07-26T15:25:34Z",
 				}, nil),
-			*createSecret("some-other-msa-account", clusterPoolNSName,
+			*createSecret(otherMSASecretName, clusterPoolNSName,
 				map[string]string{
 					"authentication.open-cluster-management.io/is-managed-serviceaccount": "true",
 				}, map[string]string{
 					"expirationTimestamp":  "2024-08-05T15:25:34Z",
 					"lastRefreshTimestamp": "2022-07-26T15:25:34Z",
 				}, nil),
-			*createSecret("baremetal", clusterPoolNSName,
+			*createSecret(baremetalSecretName, clusterPoolNSName,
 				map[string]string{
 					"environment.metal3.io": "baremetal",
 				}, nil, nil),
-			*createSecret("ai-secret", clusterPoolNSName,
+			*createSecret(aiSecretName, clusterPoolNSName,
 				map[string]string{
 					"agent-install.openshift.io/watch": "true",
 				}, nil, nil),
-			*createSecret("baremetal-api-secret", "openshift-machine-api",
+			*createSecret(baremetalAPISecretName, defaultMachineAPINS,
 				map[string]string{
 					"environment.metal3.io": "baremetal",
 				}, nil, nil),
@@ -246,7 +291,7 @@ var _ = Describe("BackupSchedule controller", func() {
 				if key == ValidationSchedule {
 
 					// mark it as expired
-					backup.Spec.TTL = metav1.Duration{Duration: time.Second * 5}
+					backup.Spec.TTL = metav1.Duration{Duration: shortTTL}
 					backup.Status.Expiration = &oneHourAgo
 
 				}
@@ -410,7 +455,7 @@ var _ = Describe("BackupSchedule controller", func() {
 	})
 	Context("When creating a BackupSchedule", func() {
 		It("Should be creating a Velero Schedule updating the Status", func() {
-			backupStorageLocation = createStorageLocation("default", veleroNamespaceName).
+			backupStorageLocation = createStorageLocation(defaultStorageLocationName, veleroNamespaceName).
 				setOwner().
 				phase(veleroapi.BackupStorageLocationPhaseAvailable).object
 			Expect(k8sClient.Create(ctx, backupStorageLocation)).Should(Succeed())
@@ -460,9 +505,9 @@ var _ = Describe("BackupSchedule controller", func() {
 			}, timeout, interval).Should(BeTrue())
 
 			rhacmBackupSchedule := *createBackupSchedule(backupScheduleName, veleroNamespaceName).
-				schedule(backupSchedule).veleroTTL(metav1.Duration{Duration: time.Hour * 72}).
+				schedule(backupSchedule).veleroTTL(metav1.Duration{Duration: defaultVeleroTTL}).
 				useManagedServiceAccount(true).
-				managedServiceAccountTTL(metav1.Duration{Duration: time.Hour * 90}).
+				managedServiceAccountTTL(metav1.Duration{Duration: msaTTL}).
 				setVolumeSnapshotLocation([]string{"dpa-1"}).
 				useOwnerReferencesInBackup(true).
 				skipImmediately(true).
@@ -483,7 +528,7 @@ var _ = Describe("BackupSchedule controller", func() {
 			baremetalSecret := corev1.Secret{}
 			Eventually(func() bool {
 				err := k8sClient.Get(ctx, types.NamespacedName{
-					Name:      "baremetal",
+					Name:      baremetalSecretName,
 					Namespace: clusterPoolNSName,
 				}, &baremetalSecret)
 				return err == nil &&
@@ -494,8 +539,8 @@ var _ = Describe("BackupSchedule controller", func() {
 			baremetalSecretAPI := corev1.Secret{}
 			Eventually(func() bool {
 				err := k8sClient.Get(ctx, types.NamespacedName{
-					Name:      "baremetal-api-secret",
-					Namespace: "openshift-machine-api",
+					Name:      baremetalAPISecretName,
+					Namespace: defaultMachineAPINS,
 				}, &baremetalSecretAPI)
 				return err == nil &&
 					baremetalSecretAPI.GetLabels()["cluster.open-cluster-management.io/backup"] == "baremetal"
@@ -506,7 +551,7 @@ var _ = Describe("BackupSchedule controller", func() {
 			autoImportSecret := corev1.Secret{}
 			Eventually(func() bool {
 				err := k8sClient.Get(ctx, types.NamespacedName{
-					Name:      "auto-import-account",
+					Name:      autoImportSecretName,
 					Namespace: clusterPoolNSName,
 				}, &autoImportSecret)
 				return err == nil &&
@@ -516,7 +561,7 @@ var _ = Describe("BackupSchedule controller", func() {
 			// verify pair secret gets backup label
 			Eventually(func() bool {
 				err := k8sClient.Get(ctx, types.NamespacedName{
-					Name:      "auto-import-account-pair",
+					Name:      autoImportPairSecretName,
 					Namespace: clusterPoolNSName,
 				}, &autoImportSecret)
 				return err == nil &&
@@ -526,7 +571,7 @@ var _ = Describe("BackupSchedule controller", func() {
 			// verify other type of msa secret DOES NOT get the backup label
 			Eventually(func() bool {
 				err := k8sClient.Get(ctx, types.NamespacedName{
-					Name:      "some-other-msa-account",
+					Name:      otherMSASecretName,
 					Namespace: clusterPoolNSName,
 				}, &autoImportSecret)
 				return err == nil &&
@@ -575,7 +620,7 @@ var _ = Describe("BackupSchedule controller", func() {
 			secretAI := corev1.Secret{}
 			Eventually(func() bool {
 				err := k8sClient.Get(ctx, types.NamespacedName{
-					Name:      "ai-secret",
+					Name:      aiSecretName,
 					Namespace: clusterPoolNSName,
 				}, &secretAI)
 				return err == nil &&
@@ -588,7 +633,7 @@ var _ = Describe("BackupSchedule controller", func() {
 
 			Expect(
 				createdBackupSchedule.Spec.VeleroTTL,
-			).Should(Equal(metav1.Duration{Duration: time.Hour * 72}))
+			).Should(Equal(metav1.Duration{Duration: defaultVeleroTTL}))
 
 			By("created backup schedule should contain velero schedules in status")
 			Eventually(func() bool {
@@ -619,7 +664,7 @@ var _ = Describe("BackupSchedule controller", func() {
 
 			Expect(
 				createdBackupSchedule.Status.VeleroScheduleResources.Spec.Template.TTL,
-			).Should(Equal(metav1.Duration{Duration: time.Hour * 72}))
+			).Should(Equal(metav1.Duration{Duration: defaultVeleroTTL}))
 
 			// update schedule, it should NOT trigger velero schedules deletion
 			Eventually(func() error {
@@ -629,7 +674,7 @@ var _ = Describe("BackupSchedule controller", func() {
 				if err != nil {
 					return err
 				}
-				createdBackupSchedule.Spec.VeleroTTL = metav1.Duration{Duration: time.Hour * 150}
+				createdBackupSchedule.Spec.VeleroTTL = metav1.Duration{Duration: extendedTTL}
 				return k8sClient.Update(context.Background(), &createdBackupSchedule, &client.UpdateOptions{})
 			}, timeout, interval).Should(Succeed())
 			Expect(
@@ -643,7 +688,7 @@ var _ = Describe("BackupSchedule controller", func() {
 					return metav1.Duration{Duration: time.Hour * 0}
 				}
 				return createdBackupSchedule.Spec.VeleroTTL
-			}, timeout, interval).Should(BeIdenticalTo(metav1.Duration{Duration: time.Hour * 150}))
+			}, timeout, interval).Should(BeIdenticalTo(metav1.Duration{Duration: extendedTTL}))
 
 			// delete one schedule, it should trigger velero schedules recreation
 			veleroSchedulesList := veleroapi.ScheduleList{}
@@ -687,7 +732,7 @@ var _ = Describe("BackupSchedule controller", func() {
 					return len(veleroSchedulesList.Items)
 				}
 				return 0
-			}, time.Second*65, interval).Should(BeNumerically("==", len(veleroScheduleNames)))
+			}, longTimeout, interval).Should(BeNumerically("==", len(veleroScheduleNames)))
 
 			// check that the velero schedules have now 150h for ttl
 			Eventually(func() metav1.Duration {
@@ -699,7 +744,7 @@ var _ = Describe("BackupSchedule controller", func() {
 					return metav1.Duration{Duration: time.Hour * 0}
 				}
 				return createdBackupSchedule.Status.VeleroScheduleManagedClusters.Spec.Template.TTL
-			}, timeout, interval).Should(BeIdenticalTo(metav1.Duration{Duration: time.Hour * 150}))
+			}, timeout, interval).Should(BeIdenticalTo(metav1.Duration{Duration: extendedTTL}))
 
 			// count velero schedules, should be still len(veleroScheduleNames)
 			Eventually(func() bool {
@@ -740,7 +785,7 @@ var _ = Describe("BackupSchedule controller", func() {
 			time.Sleep(time.Second * 7)
 			// get the schedule again
 			Expect(k8sClient.Get(ctx, backupLookupKey, &createdBackupSchedule)).To(Succeed())
-			createdBackupSchedule.Spec.VeleroTTL = metav1.Duration{Duration: time.Hour * 50}
+			createdBackupSchedule.Spec.VeleroTTL = metav1.Duration{Duration: reducedTTL}
 			Eventually(func() bool {
 				err := k8sClient.Update(
 					context.Background(),
@@ -757,7 +802,7 @@ var _ = Describe("BackupSchedule controller", func() {
 					return "unknown"
 				}
 				return string(createdBackupSchedule.Status.Phase)
-			}, time.Second*65, interval).Should(BeIdenticalTo(string(v1beta1.SchedulePhaseBackupCollision)))
+			}, longTimeout, interval).Should(BeIdenticalTo(string(v1beta1.SchedulePhaseBackupCollision)))
 
 			// new schedule backup
 			backupScheduleName3 := backupScheduleName + "-3"
@@ -841,7 +886,7 @@ var _ = Describe("BackupSchedule controller", func() {
 			// backup with invalid cron job schedule, should fail validation
 			invalidCronExpBackupName := backupScheduleName + "-invalid-cron-exp"
 			invalidCronExpBackupScheduleACM := *createBackupSchedule(invalidCronExpBackupName, veleroNamespaceName).
-				schedule("invalid-cron-exp").veleroTTL(metav1.Duration{Duration: time.Hour * 72}).
+				schedule(invalidCronExpression).veleroTTL(metav1.Duration{Duration: defaultVeleroTTL}).
 				object
 			Expect(k8sClient.Create(ctx, &invalidCronExpBackupScheduleACM)).Should(Succeed())
 
@@ -1016,7 +1061,7 @@ var _ = Describe("BackupSchedule controller", func() {
 					phase(veleroapi.BackupPhaseCompleted).startTimestamp(oneHourAgo).errors(0).
 					object,
 			}
-			backupStorageLocation = createStorageLocation("default-new", veleroNamespace.Name).
+			backupStorageLocation = createStorageLocation(newStorageLocationName, veleroNamespace.Name).
 				phase(veleroapi.BackupStorageLocationPhaseUnavailable).object
 		})
 		It(
