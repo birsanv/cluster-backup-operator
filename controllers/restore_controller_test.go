@@ -1,3 +1,18 @@
+/*
+Package controllers contains comprehensive integration tests for the ACM Restore Controller.
+
+This test suite validates the complete restore workflow including:
+- ACM Restore resource creation and lifecycle management
+- Velero Restore resource orchestration and status tracking
+- Backup selection logic (latest, specific names, skip options)
+- Dynamic sync operations with new backups
+- Error handling and validation scenarios
+- Resource filtering and namespace mapping
+- Integration with backup schedules and storage locations
+
+The tests use factory functions from create_helper.go to reduce setup complexity
+and ensure consistent test data across different scenarios.
+*/
 package controllers
 
 import (
@@ -18,64 +33,103 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 )
 
+// Restore Controller Integration Test Suite
+//
+// This test suite comprehensively validates the ACM Restore Controller functionality
+// across multiple scenarios including backup selection, resource filtering, status
+// tracking, and error handling. Each test context focuses on a specific aspect
+// of the restore workflow to ensure proper isolation and clear failure diagnosis.
 var _ = Describe("Basic Restore controller", func() {
 	logger := zap.New(zap.UseDevMode(true), zap.WriteTo(GinkgoWriter))
+
+	// Test Variables Documentation
+	//
+	// These variables are shared across all test contexts and are reset in BeforeEach
+	// to ensure test isolation. They represent the core components needed for testing
+	// the ACM Restore Controller functionality.
 	var (
-		ctx                                context.Context
-		veleroNamespace                    *corev1.Namespace
-		veleroManagedClustersBackupName    string
-		veleroResourcesBackupName          string
-		veleroResourcesGenericBackupName   string
-		veleroCredentialsBackupName        string
-		veleroCredentialsHiveBackupName    string
-		veleroCredentialsClusterBackupName string
-		channels                           []chnv1.Channel
-		clusterVersions                    []ocinfrav1.ClusterVersion
+		// Core test context and timing
+		ctx      context.Context          // Test execution context
+		timeout  = time.Second * 10       // Maximum wait time for async operations
+		interval = time.Millisecond * 250 // Polling interval for Eventually/Consistently checks
 
-		acmNamespaceName         string
-		restoreName              string
-		veleroBackups            []veleroapi.Backup
-		rhacmRestore             v1beta1.Restore
-		managedClusterNamespaces []corev1.Namespace
-		backupStorageLocation    *veleroapi.BackupStorageLocation
+		// Velero infrastructure components
+		veleroNamespace       *corev1.Namespace                // Namespace where Velero resources are created
+		backupStorageLocation *veleroapi.BackupStorageLocation // Velero backup storage configuration
 
-		skipRestore   string
-		latestBackup  string
-		invalidBackup string
+		// Backup names for different resource types
+		// These follow the pattern: acm-{type}-schedule-{timestamp}
+		veleroManagedClustersBackupName    string // Backup containing managed cluster resources
+		veleroResourcesBackupName          string // Backup containing ACM resources
+		veleroResourcesGenericBackupName   string // Backup containing generic ACM resources
+		veleroCredentialsBackupName        string // Backup containing credential resources
+		veleroCredentialsHiveBackupName    string // Backup containing Hive credential resources
+		veleroCredentialsClusterBackupName string // Backup containing cluster credential resources
 
-		timeout  = time.Second * 10
-		interval = time.Millisecond * 250
+		// Test data for ACM resources
+		channels        []chnv1.Channel            // Channel resources for testing resource restoration
+		clusterVersions []ocinfrav1.ClusterVersion // ClusterVersion resources for testing
 
+		// Restore configuration
+		acmNamespaceName         string             // ACM namespace (currently unused)
+		restoreName              string             // Name of the ACM Restore resource being tested
+		rhacmRestore             v1beta1.Restore    // The main ACM Restore resource under test
+		veleroBackups            []veleroapi.Backup // Collection of Velero backup resources
+		managedClusterNamespaces []corev1.Namespace // Namespaces for managed clusters
+
+		// Special backup name values for testing different scenarios
+		skipRestore   string // Value "skip" - indicates backup should be skipped
+		latestBackup  string // Value "latest" - indicates latest backup should be selected
+		invalidBackup string // Invalid backup name for error testing
+
+		// Resource filtering configuration
+		// These resources are included in generic backup testing scenarios
 		includedResources = []string{
-			"clusterdeployment",
-			"placementrule.apps.open-cluster-management.io",
-			"multiclusterobservability.observability.open-cluster-management.io",
-			"channel.apps.open-cluster-management.io",
-			"channel.cluster.open-cluster-management.io",
+			"clusterdeployment",                                                  // Hive cluster deployments
+			"placementrule.apps.open-cluster-management.io",                      // ACM placement rules
+			"multiclusterobservability.observability.open-cluster-management.io", // MCO resources
+			"channel.apps.open-cluster-management.io",                            // ACM channels
+			"channel.cluster.open-cluster-management.io",                         // Cluster channels
 		}
 	)
 
+	// Test Setup - JustBeforeEach
+	//
+	// This setup runs before each individual test case and creates all necessary
+	// Kubernetes resources in the test environment. The order of resource creation
+	// is important to ensure proper dependencies and avoid race conditions.
 	JustBeforeEach(func() {
+		// Create ACM resources (channels, cluster versions) if they don't exist
+		// These are shared across tests to simulate a realistic ACM environment
 		existingChannels := &chnv1.ChannelList{}
 		Expect(k8sClient.List(ctx, existingChannels, &client.ListOptions{})).To(Succeed())
 		if len(existingChannels.Items) == 0 {
+			// Create test channels that simulate restored ACM resources
 			for i := range channels {
 				Expect(k8sClient.Create(ctx, &channels[i])).Should(Succeed())
 			}
 
+			// Create test cluster versions for validation
 			for i := range clusterVersions {
 				Expect(k8sClient.Create(ctx, &clusterVersions[i])).Should(Succeed())
 			}
 		}
 
+		// Create the Velero namespace where all Velero resources will be placed
 		Expect(k8sClient.Create(ctx, veleroNamespace)).Should(Succeed())
+
+		// Create managed cluster namespaces if any are defined for this test
 		for i := range managedClusterNamespaces {
 			Expect(k8sClient.Create(ctx, &managedClusterNamespaces[i])).Should((Succeed()))
 		}
+
+		// Create all Velero backup resources that the restore will reference
 		for i := range veleroBackups {
 			Expect(k8sClient.Create(ctx, &veleroBackups[i])).Should(Succeed())
 		}
 
+		// Create and configure backup storage location if needed for this test
+		// This simulates a properly configured Velero environment
 		if backupStorageLocation != nil {
 			Expect(k8sClient.Create(ctx, backupStorageLocation)).Should(Succeed())
 			storageLookupKey := types.NamespacedName{
@@ -83,6 +137,7 @@ var _ = Describe("Basic Restore controller", func() {
 				Namespace: backupStorageLocation.Namespace,
 			}
 			Expect(k8sClient.Get(ctx, storageLookupKey, backupStorageLocation)).To(Succeed())
+			// Set storage location to available status to simulate a working Velero setup
 			backupStorageLocation.Status.Phase = veleroapi.BackupStorageLocationPhaseAvailable
 			// Velero CRD doesn't have status subresource set, so simply update the
 			// status with a normal update() call.
@@ -90,13 +145,24 @@ var _ = Describe("Basic Restore controller", func() {
 			Expect(backupStorageLocation.Status.Phase).Should(BeIdenticalTo(veleroapi.BackupStorageLocationPhaseAvailable))
 		}
 
+		// Finally, create the ACM Restore resource that will trigger the controller logic
+		// This must be last to ensure all dependencies are in place
 		Expect(k8sClient.Create(ctx, &rhacmRestore)).Should(Succeed())
 	})
 
+	// Test Cleanup - JustAfterEach
+	//
+	// This cleanup runs after each individual test case to ensure proper resource
+	// cleanup and test isolation. We use aggressive cleanup to prevent test pollution.
 	JustAfterEach(func() {
+		// Clean up backup storage location if it was created for this test
 		if backupStorageLocation != nil {
 			Expect(k8sClient.Delete(ctx, backupStorageLocation)).Should(Succeed())
 		}
+
+		// Force delete the Velero namespace with zero grace period
+		// This ensures all Velero resources (backups, restores) are cleaned up quickly
+		// and don't interfere with subsequent tests
 		var zero int64 = 0
 		Expect(
 			k8sClient.Delete(
@@ -106,155 +172,104 @@ var _ = Describe("Basic Restore controller", func() {
 			),
 		).Should(Succeed())
 
+		// Reset backup storage location to nil for next test
 		backupStorageLocation = nil
 	})
 
-	BeforeEach(func() { // default values
+	// Default Test Data Setup - BeforeEach
+	//
+	// This setup runs before each test context and initializes all test variables
+	// with standard default values. Individual test contexts can override these
+	// values in their own BeforeEach blocks to customize the test scenario.
+	//
+	// The setup uses factory functions from create_helper.go to ensure consistency
+	// and reduce code duplication across different test scenarios.
+	BeforeEach(func() {
+		// Initialize test execution context
 		ctx = context.Background()
-		veleroManagedClustersBackupName = "acm-managed-clusters-schedule-20210910181336"
-		veleroResourcesBackupName = "acm-resources-schedule-20210910181336"
-		veleroResourcesGenericBackupName = "acm-resources-generic-schedule-20210910181346"
-		veleroCredentialsBackupName = "acm-credentials-schedule-20210910181336"
-		veleroCredentialsHiveBackupName = "acm-credentials-hive-schedule-20210910181336"
-		veleroCredentialsClusterBackupName = "acm-credentials-cluster-schedule-20210910181336"
-		skipRestore = "skip"
-		latestBackup = "latest"
-		invalidBackup = "invalid-backup-name"
-		restoreName = "rhacm-restore-1"
-		resourcesTimestamp, _ := time.Parse("20060102150405", "20210910181336")
-		resourcesGenericTimestamp, _ := time.Parse("20060102150405", "20210910181346")
-		resourcesStartTime := metav1.NewTime(resourcesTimestamp)
-		resourcesGenericStartTime := metav1.NewTime(resourcesGenericTimestamp)
-		unrelatedResourcesGenericTimestamp, _ := time.Parse("20060102150405", "20210910181420")
-		unrelatedResourcesGenericStartTime := metav1.NewTime(unrelatedResourcesGenericTimestamp)
 
-		clusterVersions = []ocinfrav1.ClusterVersion{
-			*createClusterVersion("version-new-one", "aaa", map[string]string{
-				"velero.io/backup-name": "backup-123",
-			}),
-		}
+		// Create standard backup names using factory function
+		// Uses timestamps: 20210910181336 for most backups, 20210910181346 for generic
+		veleroManagedClustersBackupName, veleroResourcesBackupName, veleroResourcesGenericBackupName,
+			veleroCredentialsBackupName, veleroCredentialsHiveBackupName, veleroCredentialsClusterBackupName = createDefaultBackupNames("20210910181336", "20210910181346")
 
-		channels = []chnv1.Channel{
-			*createChannel("channel-from-backup", "default",
-				chnv1.ChannelTypeHelmRepo, "http://test.svc.cluster.local:3000/charts").
-				channelLabels(map[string]string{
-					"velero.io/backup-name": "backup-123",
-				}).object,
-			*createChannel("channel-from-backup-with-finalizers", "default",
-				chnv1.ChannelTypeHelmRepo, "http://test.svc.cluster.local:3000/charts").
-				channelLabels(map[string]string{
-					"velero.io/backup-name": "backup-123",
-				}).
-				channelFinalizers([]string{"finalizer1"}).object,
-			*createChannel("channel-not-from-backup", "default",
-				chnv1.ChannelTypeGit, "https://github.com/test/app-samples").object,
-		}
+		// Create corresponding timestamp objects for backup start times
+		resourcesStartTime, resourcesGenericStartTime, unrelatedResourcesGenericStartTime := createDefaultTimestamps("20210910181336", "20210910181346", "20210910181420")
 
+		// Set special backup name values for testing different scenarios
+		skipRestore = "skip"                  // Indicates backup should be skipped
+		latestBackup = "latest"               // Indicates latest backup should be selected
+		invalidBackup = "invalid-backup-name" // Invalid backup name for error testing
+		restoreName = "rhacm-restore-1"       // Default name for ACM Restore resource
+
+		// Create standard ACM test resources using factory functions
+		clusterVersions = createDefaultClusterVersions() // Test cluster version data
+		channels = createDefaultChannels()               // Test channel data
+
+		// Create Velero namespace and backup storage location
 		veleroNamespace = createNamespace("velero-restore-ns-1")
 		backupStorageLocation = createStorageLocation("default", veleroNamespace.Name).
 			setOwner().
 			phase(veleroapi.BackupStorageLocationPhaseAvailable).object
 
-		veleroBackups = []veleroapi.Backup{
-			*createBackup(veleroManagedClustersBackupName, veleroNamespace.Name).
-				phase(veleroapi.BackupPhaseCompleted).
-				errors(0).includedResources(backupManagedClusterResources).
-				object,
-			*createBackup(veleroResourcesBackupName, veleroNamespace.Name).
-				startTimestamp(resourcesStartTime).
-				phase(veleroapi.BackupPhaseCompleted).
-				errors(0).includedResources(includedResources).
-				object,
-			*createBackup(veleroResourcesGenericBackupName, veleroNamespace.Name).
-				startTimestamp(resourcesGenericStartTime).
-				phase(veleroapi.BackupPhaseCompleted).
-				errors(0).includedResources(includedResources).
-				object,
-			*createBackup("acm-resources-generic-schedule-20210910181420", veleroNamespace.Name).
-				startTimestamp(unrelatedResourcesGenericStartTime).
-				phase(veleroapi.BackupPhaseCompleted).
-				errors(0).includedResources(includedResources).
-				object,
-			*createBackup(veleroCredentialsBackupName, veleroNamespace.Name).
-				phase(veleroapi.BackupPhaseCompleted).
-				errors(0).includedResources(backupCredsResources).
-				object,
-			*createBackup(veleroCredentialsHiveBackupName, veleroNamespace.Name).
-				phase(veleroapi.BackupPhaseCompleted).
-				errors(0).includedResources(backupCredsResources).
-				object,
-			*createBackup(veleroCredentialsClusterBackupName, veleroNamespace.Name).
-				phase(veleroapi.BackupPhaseCompleted).
-				errors(0).includedResources(backupCredsResources).
-				object,
-		}
+		// Create standard Velero backup resources using factory function
+		// These represent the backups that the restore will reference
+		veleroBackups = createDefaultVeleroBackups(
+			veleroNamespace.Name,
+			veleroManagedClustersBackupName, veleroResourcesBackupName, veleroResourcesGenericBackupName,
+			veleroCredentialsBackupName, veleroCredentialsHiveBackupName, veleroCredentialsClusterBackupName,
+			resourcesStartTime, resourcesGenericStartTime, unrelatedResourcesGenericStartTime,
+			includedResources,
+		)
 
-		req1 := metav1.LabelSelectorRequirement{
-			Key:      "foo",
-			Operator: metav1.LabelSelectorOperator("In"),
-			Values:   []string{"bar"},
-		}
-		req2 := metav1.LabelSelectorRequirement{
-			Key:      "foo2",
-			Operator: metav1.LabelSelectorOperator("NotIn"),
-			Values:   []string{"bar2"},
-		}
+		// Create standard label selector configurations for restore filtering
+		matchExpressions, restoreOrSelector := createDefaultLabelSelectors()
 
-		matchExpressions := []metav1.LabelSelectorRequirement{
-			req1,
-			req2,
-		}
-
-		restoreOrSelector := []*metav1.LabelSelector{
-			{
-				MatchLabels: map[string]string{
-					"restore-test-1": "restore-test-1-value",
-				},
-			},
-			{
-				MatchLabels: map[string]string{
-					"restore-test-2": "restore-test-2-value",
-				},
-			},
-		}
-
+		// Initialize managed cluster namespaces (empty by default)
 		managedClusterNamespaces = []corev1.Namespace{}
-		rhacmRestore = *createACMRestore(restoreName, veleroNamespace.Name).
-			cleanupBeforeRestore(v1beta1.CleanupTypeRestored).syncRestoreWithNewBackups(true).
-			restoreSyncInterval(metav1.Duration{Duration: time.Minute * 20}).
-			veleroManagedClustersBackupName(veleroManagedClustersBackupName).
-			veleroCredentialsBackupName(veleroCredentialsBackupName).
-			restorePVs(true).
-			preserveNodePorts(true).
-			restoreStatus(&veleroapi.RestoreStatusSpec{
-				IncludedResources: []string{"webhook"},
-			}).
-			hookResources([]veleroapi.RestoreResourceHookSpec{
-				{Name: "hookName"},
-			}).
-			excludedResources([]string{"res1", "res2"}).
-			includedResources([]string{"res3", "res4"}).
-			excludedNamespaces([]string{"ns1", "ns2"}).
-			namespaceMapping(map[string]string{"ns3": "map-ns3"}).
-			includedNamespaces([]string{"ns3", "ns4"}).
-			restoreLabelSelector(&metav1.LabelSelector{
-				MatchLabels: map[string]string{
-					"restorelabel":  "value",
-					"restorelabel1": "value1",
-				},
-				MatchExpressions: matchExpressions,
-			}).
-			restoreORLabelSelector(restoreOrSelector).
-			veleroResourcesBackupName(veleroResourcesBackupName).object
+
+		// Create the main ACM Restore resource with comprehensive configuration
+		// This includes resource filtering, namespace mapping, and label selectors
+		rhacmRestore = *createDefaultACMRestore(
+			restoreName, veleroNamespace.Name,
+			veleroManagedClustersBackupName, veleroCredentialsBackupName, veleroResourcesBackupName,
+			matchExpressions, restoreOrSelector,
+			[]string{"res1", "res2"},            // excludedResources - resources to skip
+			[]string{"res3", "res4"},            // includedResources - resources to include
+			[]string{"ns1", "ns2"},              // excludedNamespaces - namespaces to skip
+			[]string{"ns3", "ns4"},              // includedNamespaces - namespaces to include
+			map[string]string{"ns3": "map-ns3"}, // namespaceMapping - namespace renaming
+			map[string]string{ // restoreLabelSelectorMatchLabels - label-based filtering
+				"restorelabel":  "value",
+				"restorelabel1": "value1",
+			},
+		)
 	})
 
+	// Test Context: Basic Restore Functionality
+	//
+	// This context tests the core restore functionality when creating an ACM Restore
+	// resource with specific backup names. It validates the complete restore workflow
+	// including Velero restore creation, status tracking, and resource verification.
 	Context("When creating a Restore with backup name", func() {
+
+		// Test Case: Basic Restore Creation and Status Tracking
+		//
+		// This test validates the fundamental restore workflow:
+		// 1. ACM Restore creation triggers Velero restore creation
+		// 2. Credentials restore is created first and must complete before others
+		// 3. Other restores (resources, managed clusters) are created after credentials
+		// 4. All Velero restores have correct configuration (PVs, node ports, filters)
+		// 5. ACM Restore status progresses through correct phases
+		// 6. Completion timestamp is set when restore finishes
 		It("Should creating a Velero Restore having non empty status", func() {
 			restoreLookupKey := types.NamespacedName{
 				Name:      restoreName,
 				Namespace: veleroNamespace.Name,
 			}
 			createdRestore := v1beta1.Restore{}
+			// Step 1: Verify credentials restore is created first
+			// The controller creates credentials restore before others for security reasons
 			By("created restore should contain velero restores in status")
 			Eventually(func() string {
 				err := k8sClient.Get(ctx, restoreLookupKey, &createdRestore)
@@ -264,8 +279,9 @@ var _ = Describe("Basic Restore controller", func() {
 				return createdRestore.Status.VeleroCredentialsRestoreName
 			}, timeout, interval).ShouldNot(BeEmpty())
 
-			// At this point, other velerorestores should not be be listed in the status - neeed to wait for
-			// the velerocredentialsrestore to complete first
+			// Step 2: Verify other restores are NOT created yet
+			// The controller waits for credentials restore to complete before creating others
+			// This ensures proper restoration order and prevents permission issues
 			Expect(createdRestore.Status.VeleroGenericResourcesRestoreName).To(BeEmpty())
 			Expect(createdRestore.Status.VeleroResourcesRestoreName).To(BeEmpty())
 			Expect(createdRestore.Status.VeleroManagedClustersRestoreName).To(BeEmpty())
@@ -433,6 +449,12 @@ var _ = Describe("Basic Restore controller", func() {
 		})
 	})
 
+	// Test Context: Latest Backup Selection Logic
+	//
+	// This context tests the automatic backup selection functionality when the restore
+	// is configured to use "latest" backups instead of specific backup names. It validates
+	// that the controller correctly identifies and selects the most recent backups
+	// based on timestamps and availability.
 	Context("When creating a Restore with backup names set to latest", func() {
 		BeforeEach(func() {
 			veleroNamespace = createNamespace("velero-restore-ns-2")
@@ -597,6 +619,12 @@ var _ = Describe("Basic Restore controller", func() {
 		})
 	})
 
+	// Test Context: Dynamic Sync Operations
+	//
+	// This context tests the dynamic sync functionality where the restore continuously
+	// monitors for new backups and automatically syncs with them. This is useful for
+	// disaster recovery scenarios where you want ongoing synchronization with the
+	// latest backup data.
 	Context("When creating a Restore with sync option enabled and new backups available", func() {
 		BeforeEach(func() {
 			veleroNamespace = createNamespace("velero-restore-ns-9")
@@ -828,6 +856,12 @@ var _ = Describe("Basic Restore controller", func() {
 		})
 	})
 
+	// Test Context: Selective Backup Skipping
+	//
+	// This context tests the ability to selectively skip certain types of backups
+	// during restore operations. This is useful when you only want to restore
+	// specific components (e.g., only credentials, only resources) rather than
+	// performing a complete restore.
 	Context("When creating a Restore with backup names set to skip", func() {
 		BeforeEach(func() {
 			veleroNamespace = createNamespace("velero-restore-ns-3")
@@ -938,6 +972,11 @@ var _ = Describe("Basic Restore controller", func() {
 		})
 	})
 
+	// Test Context: Error Handling and Validation
+	//
+	// This context tests error handling scenarios where invalid backup names are
+	// provided. It validates that the controller properly detects and reports
+	// errors when referenced backups don't exist or are invalid.
 	Context("When creating a Restore with even one invalid backup name", func() {
 		BeforeEach(func() {
 			veleroNamespace = createNamespace("velero-restore-ns-4")
@@ -1114,6 +1153,12 @@ var _ = Describe("Basic Restore controller", func() {
 		)
 	})
 
+	// Test Context: Status Lifecycle and Integration Testing
+	//
+	// This context comprehensively tests the ACM restore status lifecycle and its
+	// integration with backup schedules. It validates status transitions, finalizer
+	// handling, schedule interactions, and the complete state machine behavior
+	// of the restore controller.
 	Context("When creating a valid Restore, track the ACM restore status phases", func() {
 		BeforeEach(func() {
 			restoreName = "my-restore"
@@ -1325,6 +1370,11 @@ var _ = Describe("Basic Restore controller", func() {
 		})
 	})
 
+	// Test Context: Storage Location Validation
+	//
+	// This context tests scenarios where the backup storage location is not properly
+	// configured or available. It validates that the controller correctly handles
+	// missing or invalid storage locations and provides appropriate error messages.
 	Context("When creating a Restore and skip resources", func() {
 		BeforeEach(func() {
 			restoreName = "my-restore"

@@ -1,6 +1,9 @@
 package controllers
 
 import (
+	"fmt"
+	"time"
+
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -674,4 +677,167 @@ func (b *ChannelHelper) channelLabels(labels map[string]string) *ChannelHelper {
 func (b *ChannelHelper) channelFinalizers(finalizers []string) *ChannelHelper {
 	b.object.Finalizers = finalizers
 	return b
+}
+
+// Factory functions for restore controller test data
+
+// createDefaultBackupNames creates standard backup names for restore testing with specified timestamps
+func createDefaultBackupNames(timestamp, genericTimestamp string) (string, string, string, string, string, string) {
+	return fmt.Sprintf("acm-managed-clusters-schedule-%s", timestamp),
+		fmt.Sprintf("acm-resources-schedule-%s", timestamp),
+		fmt.Sprintf("acm-resources-generic-schedule-%s", genericTimestamp),
+		fmt.Sprintf("acm-credentials-schedule-%s", timestamp),
+		fmt.Sprintf("acm-credentials-hive-schedule-%s", timestamp),
+		fmt.Sprintf("acm-credentials-cluster-schedule-%s", timestamp)
+}
+
+// createDefaultTimestamps creates standard timestamp objects for restore testing with specified timestamp strings
+func createDefaultTimestamps(resourcesTime, resourcesGenericTime, unrelatedResourcesGenericTime string) (metav1.Time, metav1.Time, metav1.Time) {
+	resourcesTimestamp, _ := time.Parse("20060102150405", resourcesTime)
+	resourcesGenericTimestamp, _ := time.Parse("20060102150405", resourcesGenericTime)
+	unrelatedResourcesGenericTimestamp, _ := time.Parse("20060102150405", unrelatedResourcesGenericTime)
+
+	return metav1.NewTime(resourcesTimestamp),
+		metav1.NewTime(resourcesGenericTimestamp),
+		metav1.NewTime(unrelatedResourcesGenericTimestamp)
+}
+
+// createDefaultClusterVersions creates standard cluster version test data
+func createDefaultClusterVersions() []ocinfrav1.ClusterVersion {
+	return []ocinfrav1.ClusterVersion{
+		*createClusterVersion("version-new-one", "aaa", map[string]string{
+			"velero.io/backup-name": "backup-123",
+		}),
+	}
+}
+
+// createDefaultChannels creates standard channel test data
+func createDefaultChannels() []chnv1.Channel {
+	return []chnv1.Channel{
+		*createChannel("channel-from-backup", "default",
+			chnv1.ChannelTypeHelmRepo, "http://test.svc.cluster.local:3000/charts").
+			channelLabels(map[string]string{
+				"velero.io/backup-name": "backup-123",
+			}).object,
+		*createChannel("channel-from-backup-with-finalizers", "default",
+			chnv1.ChannelTypeHelmRepo, "http://test.svc.cluster.local:3000/charts").
+			channelLabels(map[string]string{
+				"velero.io/backup-name": "backup-123",
+			}).
+			channelFinalizers([]string{"finalizer1"}).object,
+		*createChannel("channel-not-from-backup", "default",
+			chnv1.ChannelTypeGit, "https://github.com/test/app-samples").object,
+	}
+}
+
+// createDefaultVeleroBackups creates standard velero backup test data
+func createDefaultVeleroBackups(
+	veleroNamespace string,
+	managedClustersBackupName, resourcesBackupName, resourcesGenericBackupName,
+	credentialsBackupName, credentialsHiveBackupName, credentialsClusterBackupName string,
+	resourcesStartTime, resourcesGenericStartTime, unrelatedResourcesGenericStartTime metav1.Time,
+	includedResources []string,
+) []veleroapi.Backup {
+	return []veleroapi.Backup{
+		*createBackup(managedClustersBackupName, veleroNamespace).
+			phase(veleroapi.BackupPhaseCompleted).
+			errors(0).includedResources(backupManagedClusterResources).
+			object,
+		*createBackup(resourcesBackupName, veleroNamespace).
+			startTimestamp(resourcesStartTime).
+			phase(veleroapi.BackupPhaseCompleted).
+			errors(0).includedResources(includedResources).
+			object,
+		*createBackup(resourcesGenericBackupName, veleroNamespace).
+			startTimestamp(resourcesGenericStartTime).
+			phase(veleroapi.BackupPhaseCompleted).
+			errors(0).includedResources(includedResources).
+			object,
+		*createBackup("acm-resources-generic-schedule-20210910181420", veleroNamespace).
+			startTimestamp(unrelatedResourcesGenericStartTime).
+			phase(veleroapi.BackupPhaseCompleted).
+			errors(0).includedResources(includedResources).
+			object,
+		*createBackup(credentialsBackupName, veleroNamespace).
+			phase(veleroapi.BackupPhaseCompleted).
+			errors(0).includedResources(backupCredsResources).
+			object,
+		*createBackup(credentialsHiveBackupName, veleroNamespace).
+			phase(veleroapi.BackupPhaseCompleted).
+			errors(0).includedResources(backupCredsResources).
+			object,
+		*createBackup(credentialsClusterBackupName, veleroNamespace).
+			phase(veleroapi.BackupPhaseCompleted).
+			errors(0).includedResources(backupCredsResources).
+			object,
+	}
+}
+
+// createDefaultLabelSelectors creates standard label selector test data
+func createDefaultLabelSelectors() ([]metav1.LabelSelectorRequirement, []*metav1.LabelSelector) {
+	req1 := metav1.LabelSelectorRequirement{
+		Key:      "foo",
+		Operator: metav1.LabelSelectorOperator("In"),
+		Values:   []string{"bar"},
+	}
+	req2 := metav1.LabelSelectorRequirement{
+		Key:      "foo2",
+		Operator: metav1.LabelSelectorOperator("NotIn"),
+		Values:   []string{"bar2"},
+	}
+
+	matchExpressions := []metav1.LabelSelectorRequirement{req1, req2}
+
+	restoreOrSelector := []*metav1.LabelSelector{
+		{
+			MatchLabels: map[string]string{
+				"restore-test-1": "restore-test-1-value",
+			},
+		},
+		{
+			MatchLabels: map[string]string{
+				"restore-test-2": "restore-test-2-value",
+			},
+		},
+	}
+
+	return matchExpressions, restoreOrSelector
+}
+
+// createDefaultACMRestore creates a fully configured ACM restore for testing with customizable resource filters
+func createDefaultACMRestore(
+	restoreName, veleroNamespace string,
+	managedClustersBackupName, credentialsBackupName, resourcesBackupName string,
+	matchExpressions []metav1.LabelSelectorRequirement,
+	restoreOrSelector []*metav1.LabelSelector,
+	excludedResources, includedResources []string,
+	excludedNamespaces, includedNamespaces []string,
+	namespaceMapping map[string]string,
+	restoreLabelSelectorMatchLabels map[string]string,
+) *v1beta1.Restore {
+	return createACMRestore(restoreName, veleroNamespace).
+		cleanupBeforeRestore(v1beta1.CleanupTypeRestored).
+		syncRestoreWithNewBackups(true).
+		restoreSyncInterval(metav1.Duration{Duration: time.Minute * 20}).
+		veleroManagedClustersBackupName(managedClustersBackupName).
+		veleroCredentialsBackupName(credentialsBackupName).
+		restorePVs(true).
+		preserveNodePorts(true).
+		restoreStatus(&veleroapi.RestoreStatusSpec{
+			IncludedResources: []string{"webhook"},
+		}).
+		hookResources([]veleroapi.RestoreResourceHookSpec{
+			{Name: "hookName"},
+		}).
+		excludedResources(excludedResources).
+		includedResources(includedResources).
+		excludedNamespaces(excludedNamespaces).
+		namespaceMapping(namespaceMapping).
+		includedNamespaces(includedNamespaces).
+		restoreLabelSelector(&metav1.LabelSelector{
+			MatchLabels:      restoreLabelSelectorMatchLabels,
+			MatchExpressions: matchExpressions,
+		}).
+		restoreORLabelSelector(restoreOrSelector).
+		veleroResourcesBackupName(resourcesBackupName).object
 }
