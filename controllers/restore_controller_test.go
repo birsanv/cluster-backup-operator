@@ -191,10 +191,12 @@ var _ = Describe("Basic Restore controller", func() {
 		// Create standard backup names using factory function
 		// Uses timestamps: 20210910181336 for most backups, 20210910181346 for generic
 		veleroManagedClustersBackupName, veleroResourcesBackupName, veleroResourcesGenericBackupName,
-			veleroCredentialsBackupName, veleroCredentialsHiveBackupName, veleroCredentialsClusterBackupName = createDefaultBackupNames("20210910181336", "20210910181346")
+			veleroCredentialsBackupName, veleroCredentialsHiveBackupName, veleroCredentialsClusterBackupName =
+			createDefaultBackupNames("20210910181336", "20210910181346")
 
 		// Create corresponding timestamp objects for backup start times
-		resourcesStartTime, resourcesGenericStartTime, unrelatedResourcesGenericStartTime := createDefaultTimestamps("20210910181336", "20210910181346", "20210910181420")
+		resourcesStartTime, resourcesGenericStartTime, unrelatedResourcesGenericStartTime :=
+			createDefaultTimestamps("20210910181336", "20210910181346", "20210910181420")
 
 		// Set special backup name values for testing different scenarios
 		skipRestore = "skip"                  // Indicates backup should be skipped
@@ -251,7 +253,7 @@ var _ = Describe("Basic Restore controller", func() {
 	// This context tests the core restore functionality when creating an ACM Restore
 	// resource with specific backup names. It validates the complete restore workflow
 	// including Velero restore creation, status tracking, and resource verification.
-	Context("When creating a Restore with backup name", func() {
+	Context("when creating restore with specific backup name", func() {
 
 		// Test Case: Basic Restore Creation and Status Tracking
 		//
@@ -262,7 +264,7 @@ var _ = Describe("Basic Restore controller", func() {
 		// 4. All Velero restores have correct configuration (PVs, node ports, filters)
 		// 5. ACM Restore status progresses through correct phases
 		// 6. Completion timestamp is set when restore finishes
-		It("Should creating a Velero Restore having non empty status", func() {
+		It("should create velero restores with proper configuration and track status progression", func() {
 			restoreLookupKey := types.NamespacedName{
 				Name:      restoreName,
 				Namespace: veleroNamespace.Name,
@@ -455,7 +457,7 @@ var _ = Describe("Basic Restore controller", func() {
 	// is configured to use "latest" backups instead of specific backup names. It validates
 	// that the controller correctly identifies and selects the most recent backups
 	// based on timestamps and availability.
-	Context("When creating a Restore with backup names set to latest", func() {
+	Context("when creating restore with backup names set to latest", func() {
 		BeforeEach(func() {
 			veleroNamespace = createNamespace("velero-restore-ns-2")
 			backupStorageLocation = createStorageLocation("default", veleroNamespace.Name).
@@ -558,7 +560,7 @@ var _ = Describe("Basic Restore controller", func() {
 					object,
 			}
 		})
-		It("Should select the most recent backups without errors", func() {
+		It("should automatically select the most recent available backups", func() {
 			createdRestore := v1beta1.Restore{}
 			By("created restore should contain velero restore in status")
 			Eventually(func() string {
@@ -625,7 +627,7 @@ var _ = Describe("Basic Restore controller", func() {
 	// monitors for new backups and automatically syncs with them. This is useful for
 	// disaster recovery scenarios where you want ongoing synchronization with the
 	// latest backup data.
-	Context("When creating a Restore with sync option enabled and new backups available", func() {
+	Context("when creating restore with sync option enabled", func() {
 		BeforeEach(func() {
 			veleroNamespace = createNamespace("velero-restore-ns-9")
 			backupStorageLocation = createStorageLocation("default", veleroNamespace.Name).
@@ -690,7 +692,7 @@ var _ = Describe("Basic Restore controller", func() {
 					object,
 			}
 		})
-		It("Should sync with the most recent backups without errors", func() {
+		It("should continuously sync with new backups when sync option is enabled", func() {
 			createdRestore := v1beta1.Restore{}
 			restoreLookupKey := types.NamespacedName{
 				Name:      restoreName,
@@ -862,7 +864,7 @@ var _ = Describe("Basic Restore controller", func() {
 	// during restore operations. This is useful when you only want to restore
 	// specific components (e.g., only credentials, only resources) rather than
 	// performing a complete restore.
-	Context("When creating a Restore with backup names set to skip", func() {
+	Context("when creating restore with backup names set to skip", func() {
 		BeforeEach(func() {
 			veleroNamespace = createNamespace("velero-restore-ns-3")
 			backupStorageLocation = createStorageLocation("default", veleroNamespace.Name).
@@ -876,7 +878,7 @@ var _ = Describe("Basic Restore controller", func() {
 
 			veleroBackups = []veleroapi.Backup{}
 		})
-		It("Should skip restoring backups without errors", func() {
+		It("should skip backup restoration when configured with skip option", func() {
 			createdRestore := v1beta1.Restore{}
 			By("created restore should contain velero restore in status")
 			Eventually(func() string {
@@ -977,7 +979,7 @@ var _ = Describe("Basic Restore controller", func() {
 	// This context tests error handling scenarios where invalid backup names are
 	// provided. It validates that the controller properly detects and reports
 	// errors when referenced backups don't exist or are invalid.
-	Context("When creating a Restore with even one invalid backup name", func() {
+	Context("when creating restore with invalid backup name", func() {
 		BeforeEach(func() {
 			veleroNamespace = createNamespace("velero-restore-ns-4")
 
@@ -1005,7 +1007,7 @@ var _ = Describe("Basic Restore controller", func() {
 					object,
 			}
 		})
-		It("Should not create any restore", func() {
+		It("should fail to create restore when backup names are invalid", func() {
 			veleroRestores := veleroapi.RestoreList{}
 			Eventually(func() bool {
 				if err := k8sClient.List(ctx, &veleroRestores, client.InNamespace(veleroNamespace.Name)); err != nil {
@@ -1050,7 +1052,7 @@ var _ = Describe("Basic Restore controller", func() {
 		})
 	})
 
-	Context("When creating a Restore in a ns different then velero ns", func() {
+	Context("when creating restore in wrong namespace", func() {
 		BeforeEach(func() {
 			veleroNamespace = createNamespace("velero-restore-ns-5")
 			backupStorageLocation = createStorageLocation("default-5", veleroNamespace.Name).
@@ -1076,35 +1078,33 @@ var _ = Describe("Basic Restore controller", func() {
 					object,
 			}
 		})
-		It(
-			"Should not create any velero restore resources, restore object created in the wrong ns",
-			func() {
-				veleroRestores := veleroapi.RestoreList{}
-				Eventually(func() bool {
-					if err := k8sClient.List(ctx, &veleroRestores, client.InNamespace(veleroNamespace.Name)); err != nil {
-						return false
-					}
-					return len(veleroRestores.Items) == 0
-				}, timeout, interval).Should(BeTrue())
-				createdRestore := v1beta1.Restore{}
-				Eventually(func() v1beta1.RestorePhase {
-					restoreLookupKey := types.NamespacedName{
-						Name:      restoreName + "-new",
-						Namespace: acmNamespaceName,
-					}
-					err := k8sClient.Get(ctx, restoreLookupKey, &createdRestore)
-					Expect(err).NotTo(HaveOccurred())
-					return createdRestore.Status.Phase
-				}, timeout, interval).Should(BeEquivalentTo(v1beta1.RestorePhaseError))
-				Expect(
-					createdRestore.Status.LastMessage,
-				).Should(BeIdenticalTo("Backup storage location not available in namespace acm-ns-1. " +
-					"Check velero.io.BackupStorageLocation and validate storage credentials."))
-			},
+		It("should fail when restore is created in wrong namespace", func() {
+			veleroRestores := veleroapi.RestoreList{}
+			Eventually(func() bool {
+				if err := k8sClient.List(ctx, &veleroRestores, client.InNamespace(veleroNamespace.Name)); err != nil {
+					return false
+				}
+				return len(veleroRestores.Items) == 0
+			}, timeout, interval).Should(BeTrue())
+			createdRestore := v1beta1.Restore{}
+			Eventually(func() v1beta1.RestorePhase {
+				restoreLookupKey := types.NamespacedName{
+					Name:      restoreName + "-new",
+					Namespace: acmNamespaceName,
+				}
+				err := k8sClient.Get(ctx, restoreLookupKey, &createdRestore)
+				Expect(err).NotTo(HaveOccurred())
+				return createdRestore.Status.Phase
+			}, timeout, interval).Should(BeEquivalentTo(v1beta1.RestorePhaseError))
+			Expect(
+				createdRestore.Status.LastMessage,
+			).Should(BeIdenticalTo("Backup storage location not available in namespace acm-ns-1. " +
+				"Check velero.io.BackupStorageLocation and validate storage credentials."))
+		},
 		)
 	})
 
-	Context("When BackupStorageLocation without OwnerReference is invalid", func() {
+	Context("when backup storage location is invalid", func() {
 		BeforeEach(func() {
 			veleroNamespace = createNamespace("velero-restore-ns-6")
 			backupStorageLocation = createStorageLocation("default-6", veleroNamespace.Name).
@@ -1125,31 +1125,29 @@ var _ = Describe("Basic Restore controller", func() {
 					object,
 			}
 		})
-		It(
-			"Should not create any velero restore resources, BackupStorageLocation is invalid",
-			func() {
-				veleroRestores := veleroapi.RestoreList{}
-				Eventually(func() bool {
-					if err := k8sClient.List(ctx, &veleroRestores, client.InNamespace(veleroNamespace.Name)); err != nil {
-						return false
-					}
-					return len(veleroRestores.Items) == 0
-				}, timeout, interval).Should(BeTrue())
-				createdRestore := v1beta1.Restore{}
-				Eventually(func() v1beta1.RestorePhase {
-					restoreLookupKey := types.NamespacedName{
-						Name:      restoreName + "-new",
-						Namespace: veleroNamespace.Name,
-					}
-					err := k8sClient.Get(ctx, restoreLookupKey, &createdRestore)
-					Expect(err).NotTo(HaveOccurred())
-					return createdRestore.Status.Phase
-				}, timeout, interval).Should(BeEquivalentTo(v1beta1.RestorePhaseError))
-				Expect(
-					createdRestore.Status.LastMessage,
-				).Should(BeIdenticalTo("Backup storage location not available in namespace velero-restore-ns-6. " +
-					"Check velero.io.BackupStorageLocation and validate storage credentials."))
-			},
+		It("should fail when backup storage location is invalid", func() {
+			veleroRestores := veleroapi.RestoreList{}
+			Eventually(func() bool {
+				if err := k8sClient.List(ctx, &veleroRestores, client.InNamespace(veleroNamespace.Name)); err != nil {
+					return false
+				}
+				return len(veleroRestores.Items) == 0
+			}, timeout, interval).Should(BeTrue())
+			createdRestore := v1beta1.Restore{}
+			Eventually(func() v1beta1.RestorePhase {
+				restoreLookupKey := types.NamespacedName{
+					Name:      restoreName + "-new",
+					Namespace: veleroNamespace.Name,
+				}
+				err := k8sClient.Get(ctx, restoreLookupKey, &createdRestore)
+				Expect(err).NotTo(HaveOccurred())
+				return createdRestore.Status.Phase
+			}, timeout, interval).Should(BeEquivalentTo(v1beta1.RestorePhaseError))
+			Expect(
+				createdRestore.Status.LastMessage,
+			).Should(BeIdenticalTo("Backup storage location not available in namespace velero-restore-ns-6. " +
+				"Check velero.io.BackupStorageLocation and validate storage credentials."))
+		},
 		)
 	})
 
@@ -1159,7 +1157,7 @@ var _ = Describe("Basic Restore controller", func() {
 	// integration with backup schedules. It validates status transitions, finalizer
 	// handling, schedule interactions, and the complete state machine behavior
 	// of the restore controller.
-	Context("When creating a valid Restore, track the ACM restore status phases", func() {
+	Context("when tracking restore status lifecycle", func() {
 		BeforeEach(func() {
 			restoreName = "my-restore"
 			veleroNamespace = createNamespace("velero-restore-ns-7")
@@ -1188,7 +1186,7 @@ var _ = Describe("Basic Restore controller", func() {
 			}
 		})
 
-		It("Should track the status evolution", func() {
+		It("should track complete status lifecycle and schedule integration", func() {
 			// should be able to  create a paused schedule, even if a restore is running
 			rhacmBackupPaused := *createBackupSchedule("backup-sch-paused", veleroNamespace.Name).
 				schedule("0 */1 * * *").
@@ -1375,7 +1373,7 @@ var _ = Describe("Basic Restore controller", func() {
 	// This context tests scenarios where the backup storage location is not properly
 	// configured or available. It validates that the controller correctly handles
 	// missing or invalid storage locations and provides appropriate error messages.
-	Context("When creating a Restore and skip resources", func() {
+	Context("when backup storage location is unavailable", func() {
 		BeforeEach(func() {
 			restoreName = "my-restore"
 			veleroNamespace = createNamespace("velero-restore-ns-8")
@@ -1397,11 +1395,36 @@ var _ = Describe("Basic Restore controller", func() {
 			}
 		})
 
-		It(
-			"Should not create any velero restore resources, BackupStorageLocation is unavailable",
-			func() {
-				createdRestore := v1beta1.Restore{}
-				By("created restore should not contain velero restores in status")
+		It("should fail when backup storage location is unavailable", func() {
+			createdRestore := v1beta1.Restore{}
+			By("created restore should not contain velero restores in status")
+			Eventually(func() string {
+				err := k8sClient.Get(ctx,
+					types.NamespacedName{
+						Name:      restoreName,
+						Namespace: veleroNamespace.Name,
+					}, &createdRestore)
+				if err != nil {
+					return err.Error()
+				}
+				return createdRestore.Status.VeleroManagedClustersRestoreName
+			}, timeout, interval).Should(BeEmpty())
+
+			By("Checking ACM restore phase when velero restore is in error", func() {
+				Eventually(func() v1beta1.RestorePhase {
+					err := k8sClient.Get(ctx,
+						types.NamespacedName{
+							Name:      restoreName,
+							Namespace: veleroNamespace.Name,
+						}, &createdRestore)
+					if err != nil {
+						return ""
+					}
+					return createdRestore.Status.Phase
+				}, timeout, interval).Should(BeEquivalentTo(v1beta1.RestorePhaseError))
+			})
+
+			By("Checking ACM restore message", func() {
 				Eventually(func() string {
 					err := k8sClient.Get(ctx,
 						types.NamespacedName{
@@ -1409,41 +1432,14 @@ var _ = Describe("Basic Restore controller", func() {
 							Namespace: veleroNamespace.Name,
 						}, &createdRestore)
 					if err != nil {
-						return err.Error()
+						return ""
 					}
-					return createdRestore.Status.VeleroManagedClustersRestoreName
-				}, timeout, interval).Should(BeEmpty())
-
-				By("Checking ACM restore phase when velero restore is in error", func() {
-					Eventually(func() v1beta1.RestorePhase {
-						err := k8sClient.Get(ctx,
-							types.NamespacedName{
-								Name:      restoreName,
-								Namespace: veleroNamespace.Name,
-							}, &createdRestore)
-						if err != nil {
-							return ""
-						}
-						return createdRestore.Status.Phase
-					}, timeout, interval).Should(BeEquivalentTo(v1beta1.RestorePhaseError))
-				})
-
-				By("Checking ACM restore message", func() {
-					Eventually(func() string {
-						err := k8sClient.Get(ctx,
-							types.NamespacedName{
-								Name:      restoreName,
-								Namespace: veleroNamespace.Name,
-							}, &createdRestore)
-						if err != nil {
-							return ""
-						}
-						return createdRestore.Status.LastMessage
-					}, timeout, interval).Should(BeIdenticalTo("velero.io.BackupStorageLocation resources not found. " +
-						"Verify you have created a konveyor.openshift.io.Velero or oadp.openshift.io.DataProtectionApplications " +
-						"resource."))
-				})
-			},
+					return createdRestore.Status.LastMessage
+				}, timeout, interval).Should(BeIdenticalTo("velero.io.BackupStorageLocation resources not found. " +
+					"Verify you have created a konveyor.openshift.io.Velero or oadp.openshift.io.DataProtectionApplications " +
+					"resource."))
+			})
+		},
 		)
 	})
 })

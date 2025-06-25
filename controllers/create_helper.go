@@ -692,7 +692,9 @@ func createDefaultBackupNames(timestamp, genericTimestamp string) (string, strin
 }
 
 // createDefaultTimestamps creates standard timestamp objects for restore testing with specified timestamp strings
-func createDefaultTimestamps(resourcesTime, resourcesGenericTime, unrelatedResourcesGenericTime string) (metav1.Time, metav1.Time, metav1.Time) {
+func createDefaultTimestamps(
+	resourcesTime, resourcesGenericTime, unrelatedResourcesGenericTime string,
+) (metav1.Time, metav1.Time, metav1.Time) {
 	resourcesTimestamp, _ := time.Parse("20060102150405", resourcesTime)
 	resourcesGenericTimestamp, _ := time.Parse("20060102150405", resourcesGenericTime)
 	unrelatedResourcesGenericTimestamp, _ := time.Parse("20060102150405", unrelatedResourcesGenericTime)
