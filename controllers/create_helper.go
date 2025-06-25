@@ -1,13 +1,17 @@
 package controllers
 
 import (
+	"context"
 	"fmt"
 	"time"
 
+	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	ocinfrav1 "github.com/openshift/api/config/v1"
 	v1beta1 "github.com/stolostron/cluster-backup-operator/api/v1beta1"
@@ -842,4 +846,179 @@ func createDefaultACMRestore(
 		}).
 		restoreORLabelSelector(restoreOrSelector).
 		veleroResourcesBackupName(resourcesBackupName).object
+}
+
+// Test Helper Functions for Common Patterns
+//
+// These functions extract common Eventually/Consistently patterns used across
+// multiple test cases to reduce code duplication and improve maintainability.
+
+// waitForRestorePhase waits for a restore to reach the specified phase
+func waitForRestorePhase(
+	ctx context.Context,
+	k8sClient client.Client,
+	restoreName, namespace string,
+	expectedPhase v1beta1.RestorePhase,
+	timeout, interval time.Duration,
+) {
+	Eventually(func() v1beta1.RestorePhase {
+		restore := v1beta1.Restore{}
+		restoreLookupKey := types.NamespacedName{
+			Name:      restoreName,
+			Namespace: namespace,
+		}
+		err := k8sClient.Get(ctx, restoreLookupKey, &restore)
+		if err != nil {
+			return ""
+		}
+		return restore.Status.Phase
+	}, timeout, interval).Should(BeEquivalentTo(expectedPhase))
+}
+
+// waitForVeleroRestoreCount waits for the specified number of velero restores in namespace
+func waitForVeleroRestoreCount(
+	ctx context.Context,
+	k8sClient client.Client,
+	namespace string,
+	expectedCount int,
+	timeout, interval time.Duration,
+) {
+	veleroRestores := veleroapi.RestoreList{}
+	Eventually(func() int {
+		if err := k8sClient.List(ctx, &veleroRestores, client.InNamespace(namespace)); err != nil {
+			return -1
+		}
+		return len(veleroRestores.Items)
+	}, timeout, interval).Should(Equal(expectedCount))
+}
+
+// waitForVeleroRestoreCountToBe waits for velero restores count to match condition
+func waitForVeleroRestoreCountToBe(
+	ctx context.Context,
+	k8sClient client.Client,
+	namespace string,
+	condition func(int) bool,
+	timeout, interval time.Duration,
+) {
+	veleroRestores := veleroapi.RestoreList{}
+	Eventually(func() bool {
+		if err := k8sClient.List(ctx, &veleroRestores, client.InNamespace(namespace)); err != nil {
+			return false
+		}
+		return condition(len(veleroRestores.Items))
+	}, timeout, interval).Should(BeTrue())
+}
+
+// getRestoreWithRetry gets a restore resource with retry logic
+func getRestoreWithRetry(
+	ctx context.Context,
+	k8sClient client.Client,
+	restoreName, namespace string,
+	timeout, interval time.Duration,
+) *v1beta1.Restore {
+	restore := &v1beta1.Restore{}
+	Eventually(func() error {
+		restoreLookupKey := types.NamespacedName{
+			Name:      restoreName,
+			Namespace: namespace,
+		}
+		return k8sClient.Get(ctx, restoreLookupKey, restore)
+	}, timeout, interval).Should(Succeed())
+	return restore
+}
+
+// waitForRestoreStatusField waits for a specific restore status field to have expected value
+func waitForRestoreStatusField(
+	ctx context.Context,
+	k8sClient client.Client,
+	restoreName, namespace string,
+	fieldExtractor func(*v1beta1.Restore) string,
+	expectedValue string,
+	timeout, interval time.Duration,
+) {
+	Eventually(func() string {
+		restore := v1beta1.Restore{}
+		restoreLookupKey := types.NamespacedName{
+			Name:      restoreName,
+			Namespace: namespace,
+		}
+		err := k8sClient.Get(ctx, restoreLookupKey, &restore)
+		if err != nil {
+			return ""
+		}
+		return fieldExtractor(&restore)
+	}, timeout, interval).Should(Equal(expectedValue))
+}
+
+// waitForRestoreStatusFieldEmpty waits for a specific restore status field to be empty
+func waitForRestoreStatusFieldEmpty(
+	ctx context.Context,
+	k8sClient client.Client,
+	restoreName, namespace string,
+	fieldExtractor func(*v1beta1.Restore) string,
+	timeout, interval time.Duration,
+) {
+	Eventually(func() string {
+		restore := v1beta1.Restore{}
+		restoreLookupKey := types.NamespacedName{
+			Name:      restoreName,
+			Namespace: namespace,
+		}
+		err := k8sClient.Get(ctx, restoreLookupKey, &restore)
+		if err != nil {
+			return err.Error()
+		}
+		return fieldExtractor(&restore)
+	}, timeout, interval).Should(BeEmpty())
+}
+
+// waitForCompletionTimestamp waits for restore completion timestamp to be set
+func waitForCompletionTimestamp(
+	ctx context.Context,
+	k8sClient client.Client,
+	restoreName, namespace string,
+	timeout, interval time.Duration,
+) {
+	Eventually(func() *metav1.Time {
+		restore := v1beta1.Restore{}
+		restoreLookupKey := types.NamespacedName{
+			Name:      restoreName,
+			Namespace: namespace,
+		}
+		err := k8sClient.Get(ctx, restoreLookupKey, &restore)
+		if err != nil {
+			return nil
+		}
+		return restore.Status.CompletionTimestamp
+	}, timeout, interval).ShouldNot(BeNil())
+}
+
+// createLookupKey creates a NamespacedName for any resource lookup
+func createLookupKey(name, namespace string) types.NamespacedName {
+	return types.NamespacedName{
+		Name:      name,
+		Namespace: namespace,
+	}
+}
+
+// waitForRestoreStatusFieldNonEmpty waits for a specific restore status field to become non-empty
+func waitForRestoreStatusFieldNonEmpty(
+	ctx context.Context,
+	k8sClient client.Client,
+	restoreName, namespace string,
+	fieldExtractor func(*v1beta1.Restore) string,
+	timeout, interval time.Duration,
+) {
+	Eventually(func() string {
+		restore := v1beta1.Restore{}
+		restoreLookupKey := types.NamespacedName{
+			Name:      restoreName,
+			Namespace: namespace,
+		}
+		err := k8sClient.Get(ctx, restoreLookupKey, &restore)
+		if err != nil {
+			return ""
+		}
+		return fieldExtractor(&restore)
+	}, timeout, interval).ShouldNot(BeEmpty())
 }
