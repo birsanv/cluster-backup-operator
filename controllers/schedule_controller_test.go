@@ -55,6 +55,13 @@ var _ = Describe("BackupSchedule controller", func() {
 		reducedTTL       = time.Hour * 50
 		msaTTL           = time.Hour * 90
 		shortTTL         = time.Second * 5
+		zeroTTL          = time.Duration(0) // Zero duration for TTL
+
+		// Test timing delays
+		backupCollisionDelay = time.Second * 7 // Sleep duration to trigger backup collision detection
+
+		// Expected test counts
+		expectedACMScheduleCount = 5 // Minimum expected number of ACM schedules in tests
 
 		// Storage location names
 		defaultStorageLocationName = "default"
@@ -685,7 +692,7 @@ var _ = Describe("BackupSchedule controller", func() {
 			Eventually(func() metav1.Duration {
 				err := k8sClient.Get(ctx, backupLookupKey, &createdBackupSchedule)
 				if err != nil {
-					return metav1.Duration{Duration: time.Hour * 0}
+					return metav1.Duration{Duration: zeroTTL}
 				}
 				return createdBackupSchedule.Spec.VeleroTTL
 			}, timeout, interval).Should(BeIdenticalTo(metav1.Duration{Duration: extendedTTL}))
@@ -738,10 +745,10 @@ var _ = Describe("BackupSchedule controller", func() {
 			Eventually(func() metav1.Duration {
 				err := k8sClient.Get(ctx, backupLookupKey, &createdBackupSchedule)
 				if err != nil {
-					return metav1.Duration{Duration: time.Hour * 0}
+					return metav1.Duration{Duration: zeroTTL}
 				}
 				if createdBackupSchedule.Status.VeleroScheduleManagedClusters == nil {
-					return metav1.Duration{Duration: time.Hour * 0}
+					return metav1.Duration{Duration: zeroTTL}
 				}
 				return createdBackupSchedule.Status.VeleroScheduleManagedClusters.Spec.Template.TTL
 			}, timeout, interval).Should(BeIdenticalTo(metav1.Duration{Duration: extendedTTL}))
@@ -778,11 +785,11 @@ var _ = Describe("BackupSchedule controller", func() {
 				}
 				return string(createdBackupSchedule.Status.Phase)
 			}, timeout, interval).Should(BeIdenticalTo(string(v1beta1.SchedulePhaseEnabled)))
-			// then sleep 7 seconds to let the schedule timestamp be older then 5 sec from now
+			// then sleep to let the schedule timestamp be older then 5 sec from now
 			// then update the schedule, which will try to create a new set of velero schedules
 			// when the clusterID is checked, it is going to be (unknown) - since we have no cluster resource on test
 			// and the previous schedules had used abcd as clusterId
-			time.Sleep(time.Second * 7)
+			time.Sleep(backupCollisionDelay)
 			// get the schedule again
 			Expect(k8sClient.Get(ctx, backupLookupKey, &createdBackupSchedule)).To(Succeed())
 			createdBackupSchedule.Spec.VeleroTTL = metav1.Duration{Duration: reducedTTL}
@@ -825,7 +832,7 @@ var _ = Describe("BackupSchedule controller", func() {
 
 			Expect(
 				createdBackupScheduleNoTTL.Spec.VeleroTTL,
-			).Should(Equal(metav1.Duration{Duration: time.Second * 0}))
+			).Should(Equal(metav1.Duration{Duration: zeroTTL}))
 
 			Expect(createdBackupScheduleNoTTL.Spec.VeleroSchedule).Should(Equal(backupSchedule))
 
@@ -854,7 +861,7 @@ var _ = Describe("BackupSchedule controller", func() {
 			// backup not created in velero namespace, should fail validation
 			acmBackupName := backupScheduleName
 			rhacmBackupScheduleACM := *createBackupSchedule(acmBackupName, acmNamespaceName /* NOT velero ns */).
-				schedule(backupSchedule).veleroTTL(metav1.Duration{Duration: time.Hour * 72}).
+				schedule(backupSchedule).veleroTTL(metav1.Duration{Duration: defaultVeleroTTL}).
 				object
 			Expect(k8sClient.Create(ctx, &rhacmBackupScheduleACM)).Should(Succeed())
 
@@ -968,7 +975,7 @@ var _ = Describe("BackupSchedule controller", func() {
 				err := k8sClient.List(ctx, &acmSchedulesList, &client.ListOptions{})
 				return err == nil
 			}, timeout, interval).Should(BeTrue())
-			Expect(len(acmSchedulesList.Items)).To(BeNumerically(">=", 5))
+			Expect(len(acmSchedulesList.Items)).To(BeNumerically(">=", expectedACMScheduleCount))
 
 			// count velero schedules
 			veleroScheduleList := veleroapi.ScheduleList{}
@@ -1068,7 +1075,7 @@ var _ = Describe("BackupSchedule controller", func() {
 			"Should not create any velero schedule resources, BackupStorageLocation doesnt exist or is invalid",
 			func() {
 				rhacmBackupSchedule := *createBackupSchedule(backupScheduleName+"-new", newVeleroNamespace).
-					schedule(backupSchedule).veleroTTL(metav1.Duration{Duration: time.Hour * 72}).
+					schedule(backupSchedule).veleroTTL(metav1.Duration{Duration: defaultVeleroTTL}).
 					object
 
 				Expect(k8sClient.Create(ctx, &rhacmBackupSchedule)).Should(Succeed())
@@ -1110,7 +1117,7 @@ var _ = Describe("BackupSchedule controller", func() {
 				Expect(k8sClient.Update(ctx, backupStorageLocation)).To(Succeed())
 
 				rhacmBackupScheduleNew := *createBackupSchedule(backupScheduleName+"-new-1", newVeleroNamespace).
-					schedule(backupSchedule).veleroTTL(metav1.Duration{Duration: time.Hour * 72}).
+					schedule(backupSchedule).veleroTTL(metav1.Duration{Duration: defaultVeleroTTL}).
 					object
 				Expect(k8sClient.Create(ctx, &rhacmBackupScheduleNew)).Should(Succeed())
 				createdScheduleNew := v1beta1.BackupSchedule{}
