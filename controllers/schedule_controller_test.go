@@ -14,7 +14,6 @@ import (
 	v1beta1 "github.com/stolostron/cluster-backup-operator/api/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	clusterv1 "open-cluster-management.io/api/cluster/v1"
 
 	hivev1 "github.com/openshift/hive/apis/hive/v1"
@@ -466,10 +465,7 @@ var _ = Describe("BackupSchedule controller", func() {
 				setOwner().
 				phase(veleroapi.BackupStorageLocationPhaseAvailable).object
 			Expect(k8sClient.Create(ctx, backupStorageLocation)).Should(Succeed())
-			storageLookupKey := types.NamespacedName{
-				Name:      backupStorageLocation.Name,
-				Namespace: backupStorageLocation.Namespace,
-			}
+			storageLookupKey := createLookupKey(backupStorageLocation.Name, backupStorageLocation.Namespace)
 			Expect(k8sClient.Get(ctx, storageLookupKey, backupStorageLocation)).Should(Succeed())
 			backupStorageLocation.Status.Phase = veleroapi.BackupStorageLocationPhaseAvailable
 			// Velero CRD doesn't have status subresource set, so simply update the
@@ -485,10 +481,7 @@ var _ = Describe("BackupSchedule controller", func() {
 
 			createdVeleroNamespace := corev1.Namespace{}
 			Eventually(func() bool {
-				if err := k8sClient.Get(ctx, types.NamespacedName{
-					Name:      veleroNamespaceName,
-					Namespace: "",
-				}, &createdVeleroNamespace); err != nil {
+				if err := k8sClient.Get(ctx, createLookupKey(veleroNamespaceName, ""), &createdVeleroNamespace); err != nil {
 					return false
 				}
 				if createdVeleroNamespace.Status.Phase == "Active" {
@@ -499,10 +492,7 @@ var _ = Describe("BackupSchedule controller", func() {
 
 			createdACMNamespace := corev1.Namespace{}
 			Eventually(func() bool {
-				if err := k8sClient.Get(ctx, types.NamespacedName{
-					Name:      acmNamespaceName,
-					Namespace: "",
-				}, &createdACMNamespace); err != nil {
+				if err := k8sClient.Get(ctx, createLookupKey(acmNamespaceName, ""), &createdACMNamespace); err != nil {
 					return false
 				}
 				if createdACMNamespace.Status.Phase == "Active" {
@@ -521,10 +511,7 @@ var _ = Describe("BackupSchedule controller", func() {
 				object
 			Expect(k8sClient.Create(ctx, &rhacmBackupSchedule)).Should(Succeed())
 
-			backupLookupKey := types.NamespacedName{
-				Name:      backupScheduleName,
-				Namespace: veleroNamespaceName,
-			}
+			backupLookupKey := createLookupKey(backupScheduleName, veleroNamespaceName)
 			createdBackupSchedule := v1beta1.BackupSchedule{}
 			Eventually(func() bool {
 				err := k8sClient.Get(ctx, backupLookupKey, &createdBackupSchedule)
@@ -534,10 +521,7 @@ var _ = Describe("BackupSchedule controller", func() {
 			// validate baremetal secret has backup annotation
 			baremetalSecret := corev1.Secret{}
 			Eventually(func() bool {
-				err := k8sClient.Get(ctx, types.NamespacedName{
-					Name:      baremetalSecretName,
-					Namespace: clusterPoolNSName,
-				}, &baremetalSecret)
+				err := k8sClient.Get(ctx, createLookupKey(baremetalSecretName, clusterPoolNSName), &baremetalSecret)
 				return err == nil &&
 					baremetalSecret.GetLabels()["cluster.open-cluster-management.io/backup"] == "baremetal"
 			}, timeout, interval).Should(BeTrue())
@@ -545,10 +529,7 @@ var _ = Describe("BackupSchedule controller", func() {
 			// and the ones under openshift-machine-api dont
 			baremetalSecretAPI := corev1.Secret{}
 			Eventually(func() bool {
-				err := k8sClient.Get(ctx, types.NamespacedName{
-					Name:      baremetalAPISecretName,
-					Namespace: defaultMachineAPINS,
-				}, &baremetalSecretAPI)
+				err := k8sClient.Get(ctx, createLookupKey(baremetalAPISecretName, defaultMachineAPINS), &baremetalSecretAPI)
 				return err == nil &&
 					baremetalSecretAPI.GetLabels()["cluster.open-cluster-management.io/backup"] == "baremetal"
 			}, timeout, interval).Should(BeFalse())
@@ -557,30 +538,21 @@ var _ = Describe("BackupSchedule controller", func() {
 			// if the UseManagedServiceAccount is set to true
 			autoImportSecret := corev1.Secret{}
 			Eventually(func() bool {
-				err := k8sClient.Get(ctx, types.NamespacedName{
-					Name:      autoImportSecretName,
-					Namespace: clusterPoolNSName,
-				}, &autoImportSecret)
+				err := k8sClient.Get(ctx, createLookupKey(autoImportSecretName, clusterPoolNSName), &autoImportSecret)
 				return err == nil &&
 					autoImportSecret.GetLabels()["cluster.open-cluster-management.io/backup"] == "msa"
 			}, timeout, interval).Should(Equal(rhacmBackupSchedule.Spec.UseManagedServiceAccount))
 
 			// verify pair secret gets backup label
 			Eventually(func() bool {
-				err := k8sClient.Get(ctx, types.NamespacedName{
-					Name:      autoImportPairSecretName,
-					Namespace: clusterPoolNSName,
-				}, &autoImportSecret)
+				err := k8sClient.Get(ctx, createLookupKey(autoImportPairSecretName, clusterPoolNSName), &autoImportSecret)
 				return err == nil &&
 					autoImportSecret.GetLabels()["cluster.open-cluster-management.io/backup"] == "msa"
 			}, timeout, interval).Should(Equal(rhacmBackupSchedule.Spec.UseManagedServiceAccount))
 
 			// verify other type of msa secret DOES NOT get the backup label
 			Eventually(func() bool {
-				err := k8sClient.Get(ctx, types.NamespacedName{
-					Name:      otherMSASecretName,
-					Namespace: clusterPoolNSName,
-				}, &autoImportSecret)
+				err := k8sClient.Get(ctx, createLookupKey(otherMSASecretName, clusterPoolNSName), &autoImportSecret)
 				return err == nil &&
 					autoImportSecret.GetLabels()["cluster.open-cluster-management.io/backup"] == "msa"
 			}, timeout, interval).ShouldNot(Equal(rhacmBackupSchedule.Spec.UseManagedServiceAccount))
@@ -626,10 +598,7 @@ var _ = Describe("BackupSchedule controller", func() {
 			// validate AI secret has backup annotation
 			secretAI := corev1.Secret{}
 			Eventually(func() bool {
-				err := k8sClient.Get(ctx, types.NamespacedName{
-					Name:      aiSecretName,
-					Namespace: clusterPoolNSName,
-				}, &secretAI)
+				err := k8sClient.Get(ctx, createLookupKey(aiSecretName, clusterPoolNSName), &secretAI)
 				return err == nil &&
 					secretAI.GetLabels()["cluster.open-cluster-management.io/backup"] == "agent-install"
 			}, timeout, interval).Should(BeTrue())
@@ -818,10 +787,7 @@ var _ = Describe("BackupSchedule controller", func() {
 				object
 			Expect(k8sClient.Create(ctx, &backupSchedule3)).Should(Succeed())
 
-			backupLookupKeyNoTTL := types.NamespacedName{
-				Name:      backupScheduleNameNoTTL,
-				Namespace: veleroNamespaceName,
-			}
+			backupLookupKeyNoTTL := createLookupKey(backupScheduleNameNoTTL, veleroNamespaceName)
 			createdBackupScheduleNoTTL := v1beta1.BackupSchedule{}
 			Eventually(func() bool {
 				err := k8sClient.Get(ctx, backupLookupKeyNoTTL, &createdBackupScheduleNoTTL)
@@ -865,10 +831,7 @@ var _ = Describe("BackupSchedule controller", func() {
 				object
 			Expect(k8sClient.Create(ctx, &rhacmBackupScheduleACM)).Should(Succeed())
 
-			backupLookupKeyACM := types.NamespacedName{
-				Name:      acmBackupName,
-				Namespace: acmNamespaceName,
-			}
+			backupLookupKeyACM := createLookupKey(acmBackupName, acmNamespaceName)
 			createdBackupScheduleACM := v1beta1.BackupSchedule{}
 			Eventually(func() bool {
 				err := k8sClient.Get(ctx, backupLookupKeyACM, &createdBackupScheduleACM)
@@ -897,10 +860,7 @@ var _ = Describe("BackupSchedule controller", func() {
 				object
 			Expect(k8sClient.Create(ctx, &invalidCronExpBackupScheduleACM)).Should(Succeed())
 
-			backupLookupKeyInvalidCronExp := types.NamespacedName{
-				Name:      invalidCronExpBackupName,
-				Namespace: veleroNamespaceName,
-			}
+			backupLookupKeyInvalidCronExp := createLookupKey(invalidCronExpBackupName, veleroNamespaceName)
 			createdBackupScheduleInvalidCronExp := v1beta1.BackupSchedule{}
 			Eventually(func() bool {
 				err := k8sClient.Get(
@@ -1089,10 +1049,7 @@ var _ = Describe("BackupSchedule controller", func() {
 				}, timeout, interval).Should(BeTrue())
 				createdSchedule := v1beta1.BackupSchedule{}
 				Eventually(func() v1beta1.SchedulePhase {
-					scheduleLookupKey := types.NamespacedName{
-						Name:      backupScheduleName + "-new",
-						Namespace: newVeleroNamespace,
-					}
+					scheduleLookupKey := createLookupKey(backupScheduleName+"-new", newVeleroNamespace)
 					err := k8sClient.Get(ctx, scheduleLookupKey, &createdSchedule)
 					Expect(err).NotTo(HaveOccurred())
 					return createdSchedule.Status.Phase
@@ -1106,10 +1063,7 @@ var _ = Describe("BackupSchedule controller", func() {
 				// create the storage location now but in the wrong ns
 				Expect(k8sClient.Create(ctx, backupStorageLocation)).Should(Succeed())
 
-				storageLookupKey := types.NamespacedName{
-					Name:      backupStorageLocation.Name,
-					Namespace: backupStorageLocation.Namespace,
-				}
+				storageLookupKey := createLookupKey(backupStorageLocation.Name, backupStorageLocation.Namespace)
 				Expect(k8sClient.Get(ctx, storageLookupKey, backupStorageLocation)).To(Succeed())
 				backupStorageLocation.Status.Phase = veleroapi.BackupStorageLocationPhaseAvailable
 				// Velero CRD doesn't have status subresource set, so simply update the
@@ -1122,10 +1076,7 @@ var _ = Describe("BackupSchedule controller", func() {
 				Expect(k8sClient.Create(ctx, &rhacmBackupScheduleNew)).Should(Succeed())
 				createdScheduleNew := v1beta1.BackupSchedule{}
 				Eventually(func() v1beta1.SchedulePhase {
-					scheduleLookupKey := types.NamespacedName{
-						Name:      backupScheduleName + "-new-1",
-						Namespace: newVeleroNamespace,
-					}
+					scheduleLookupKey := createLookupKey(backupScheduleName+"-new-1", newVeleroNamespace)
 					err := k8sClient.Get(ctx, scheduleLookupKey, &createdScheduleNew)
 					Expect(err).NotTo(HaveOccurred())
 					return createdScheduleNew.Status.Phase
