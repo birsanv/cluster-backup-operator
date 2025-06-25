@@ -248,989 +248,679 @@ var _ = Describe("Basic Restore controller", func() {
 		)
 	})
 
+	// =============================================================================
+	// CORE FUNCTIONALITY TESTS
+	// =============================================================================
+	//
+	// This section tests the fundamental restore operations including basic restore
+	// creation, backup selection logic, and core workflow validation.
+
 	// Test Context: Basic Restore Functionality
 	//
 	// This context tests the core restore functionality when creating an ACM Restore
 	// resource with specific backup names. It validates the complete restore workflow
 	// including Velero restore creation, status tracking, and resource verification.
-	Context("when creating restore with specific backup name", func() {
+	Context("basic restore functionality", func() {
+		Context("when creating restore with specific backup name", func() {
 
-		// Test Case: Basic Restore Creation and Status Tracking
+			// Test Case: Basic Restore Creation and Status Tracking
+			//
+			// This test validates the fundamental restore workflow:
+			// 1. ACM Restore creation triggers Velero restore creation
+			// 2. Credentials restore is created first and must complete before others
+			// 3. Other restores (resources, managed clusters) are created after credentials
+			// 4. All Velero restores have correct configuration (PVs, node ports, filters)
+			// 5. ACM Restore status progresses through correct phases
+			// 6. Completion timestamp is set when restore finishes
+			It("should create velero restores with proper configuration and track status progression", func() {
+				restoreLookupKey := createLookupKey(restoreName, veleroNamespace.Name)
+				createdRestore := v1beta1.Restore{}
+				// Step 1: Verify credentials restore is created first
+				// The controller creates credentials restore before others for security reasons
+				By("created restore should contain velero restores in status")
+				waitForRestoreStatusFieldNonEmpty(ctx, k8sClient, restoreName, veleroNamespace.Name,
+					func(r *v1beta1.Restore) string { return r.Status.VeleroCredentialsRestoreName },
+					timeout, interval)
+				// Get the restore to access the credentials restore name
+				Eventually(func() error {
+					return k8sClient.Get(ctx, restoreLookupKey, &createdRestore)
+				}, timeout, interval).Should(Succeed())
+
+				// Step 2: Verify other restores are NOT created yet
+				// The controller waits for credentials restore to complete before creating others
+				// This ensures proper restoration order and prevents permission issues
+				Expect(createdRestore.Status.VeleroGenericResourcesRestoreName).To(BeEmpty())
+				Expect(createdRestore.Status.VeleroResourcesRestoreName).To(BeEmpty())
+				Expect(createdRestore.Status.VeleroManagedClustersRestoreName).To(BeEmpty())
+
+				// Update credentials veleroRestore status to fake out a completed velero restore
+				veleroCredentialsRestore := &veleroapi.Restore{}
+				Expect(k8sClient.Get(ctx,
+					types.NamespacedName{Name: createdRestore.Status.VeleroCredentialsRestoreName, Namespace: veleroNamespace.Name},
+					veleroCredentialsRestore)).To(Succeed())
+				// Set status to completed
+				veleroCredentialsRestore.Status = veleroapi.RestoreStatus{
+					Phase: veleroapi.RestorePhaseCompleted,
+				}
+				// Velero CRD doesn't have status subresource set, so simply update the
+				// status with a normal update() call.
+				Expect(k8sClient.Update(ctx, veleroCredentialsRestore)).To(Succeed())
+				// Expect(k8sClient.Status().Update(ctx, veleroCredentialsRestore)).To(Succeed())
+
+				// Now that the credentials restore is done (we faked it was complete in the
+				// velero restore status), other restores should be created
+				Eventually(func() bool {
+					err := k8sClient.Get(ctx, restoreLookupKey, &createdRestore)
+					if err != nil {
+						return false
+					}
+
+					// Fail immediately if we see either of these phases - means we have a timing
+					// issue and have incorrectly upated the status before all restores are done
+					Expect(createdRestore.Status.Phase).NotTo(Equal(v1beta1.RestorePhaseFinished))
+					Expect(createdRestore.Status.Phase).NotTo(Equal(v1beta1.RestoreComplete))
+					Expect(createdRestore.Status.CompletionTimestamp).Should(BeNil())
+
+					return createdRestore.Status.VeleroGenericResourcesRestoreName != "" &&
+						createdRestore.Status.VeleroResourcesRestoreName != "" &&
+						createdRestore.Status.VeleroManagedClustersRestoreName != ""
+				}, timeout, interval).Should(BeTrue())
+
+				Consistently(func() bool {
+					// Make sure acm restore status never goes to finished or complete as the other velero restores
+					// are not done (status is "" which we interpret as "Unknown")
+					Expect(k8sClient.Get(ctx, restoreLookupKey, &createdRestore)).To(Succeed())
+					logger.Info("velero restores running", "createdRestore.Status.Phase", createdRestore.Status.Phase)
+					return createdRestore.Status.Phase == v1beta1.RestorePhaseFinished ||
+						createdRestore.Status.Phase == v1beta1.RestoreComplete
+				}, 2*time.Second, interval).Should(BeFalse())
+
+				backupNames := []string{
+					veleroManagedClustersBackupName,
+					veleroResourcesBackupName,
+					veleroResourcesGenericBackupName,
+					veleroCredentialsBackupName,
+					veleroCredentialsHiveBackupName,
+					veleroCredentialsClusterBackupName,
+				}
+				waitForVeleroRestoreCount(ctx, k8sClient, veleroNamespace.Name, len(backupNames), timeout, interval)
+
+				// Get the velero restores for further validation
+				veleroRestores := veleroapi.RestoreList{}
+				Expect(k8sClient.List(ctx, &veleroRestores, client.InNamespace(veleroNamespace.Name))).To(Succeed())
+
+				req1 := metav1.LabelSelectorRequirement{
+					Key:      "foo",
+					Operator: metav1.LabelSelectorOperator("In"),
+					Values:   []string{"bar"},
+				}
+				req2 := metav1.LabelSelectorRequirement{
+					Key:      "foo2",
+					Operator: metav1.LabelSelectorOperator("NotIn"),
+					Values:   []string{"bar2"},
+				}
+
+				restoreNames := []string{}
+				for i := range backupNames {
+					// look for velero optional properties
+					Expect(*veleroRestores.Items[i].Spec.RestorePVs).Should(BeTrue())
+					Expect(*veleroRestores.Items[i].Spec.PreserveNodePorts).Should(BeTrue())
+					Expect(veleroRestores.Items[i].Spec.RestoreStatus.IncludedResources[0]).
+						Should(BeIdenticalTo("webhook"))
+					Expect(veleroRestores.Items[i].Spec.Hooks.Resources[0].Name).Should(
+						BeIdenticalTo("hookName"))
+					Expect(veleroRestores.Items[i].Spec.ExcludedNamespaces).Should(
+						ContainElement("ns1"))
+					Expect(veleroRestores.Items[i].Spec.IncludedNamespaces).Should(
+						ContainElement("ns3"))
+					Expect(veleroRestores.Items[i].Spec.NamespaceMapping["ns3"]).Should(
+						BeIdenticalTo("map-ns3"))
+					Expect(veleroRestores.Items[i].Spec.IncludedNamespaces).Should(
+						ContainElement("ns4"))
+					Expect(veleroRestores.Items[i].Spec.IncludedNamespaces).Should(
+						ContainElement("ns4"))
+					Expect(veleroRestores.Items[i].Spec.ExcludedResources).Should(
+						ContainElement("res1"))
+					Expect(veleroRestores.Items[i].Spec.IncludedResources).Should(
+						ContainElement("res3"))
+					Expect(veleroRestores.Items[i].Spec.IncludedResources).Should(
+						ContainElement("res4"))
+					Expect(veleroRestores.Items[i].Spec.LabelSelector.MatchLabels["restorelabel"]).Should(
+						BeIdenticalTo("value"))
+					Expect(veleroRestores.Items[i].Spec.LabelSelector.MatchExpressions).Should(
+						ContainElement(req1))
+					Expect(veleroRestores.Items[i].Spec.LabelSelector.MatchExpressions).Should(
+						ContainElement(req2))
+
+					// should use the OrLabelSelectors
+					Expect(veleroRestores.Items[i].Spec.OrLabelSelectors[0].MatchLabels["restore-test-1"]).Should(
+						BeIdenticalTo("restore-test-1-value"))
+					Expect(veleroRestores.Items[i].Spec.OrLabelSelectors[1].MatchLabels["restore-test-2"]).Should(
+						BeIdenticalTo("restore-test-2-value"))
+
+					_, found := find(backupNames, veleroRestores.Items[i].Spec.BackupName)
+					Expect(found).Should(BeTrue())
+
+					restoreNames = append(restoreNames, veleroRestores.Items[i].GetName())
+				}
+
+				// Now update all the velero restores to simulate that they are complete
+				updateVeleroRestoreStatusToCompleted(ctx, k8sClient, restoreNames, veleroNamespace.Name, timeout, interval)
+
+				// TODO: there's a lot more steps in the restore that could be
+				// tested here
+
+				// Now the acm restore should proceed to Finished phase
+				waitForRestorePhase(ctx, k8sClient, restoreName, veleroNamespace.Name, v1beta1.RestorePhaseFinished, timeout, interval)
+				// When acm restore is finished CompletionTimestamp should be set
+				waitForCompletionTimestamp(ctx, k8sClient, restoreName, veleroNamespace.Name, timeout, interval)
+			})
+		})
+
+		// Test Context: Latest Backup Selection Logic
 		//
-		// This test validates the fundamental restore workflow:
-		// 1. ACM Restore creation triggers Velero restore creation
-		// 2. Credentials restore is created first and must complete before others
-		// 3. Other restores (resources, managed clusters) are created after credentials
-		// 4. All Velero restores have correct configuration (PVs, node ports, filters)
-		// 5. ACM Restore status progresses through correct phases
-		// 6. Completion timestamp is set when restore finishes
-		It("should create velero restores with proper configuration and track status progression", func() {
-			restoreLookupKey := createLookupKey(restoreName, veleroNamespace.Name)
-			createdRestore := v1beta1.Restore{}
-			// Step 1: Verify credentials restore is created first
-			// The controller creates credentials restore before others for security reasons
-			By("created restore should contain velero restores in status")
-			waitForRestoreStatusFieldNonEmpty(ctx, k8sClient, restoreName, veleroNamespace.Name,
-				func(r *v1beta1.Restore) string { return r.Status.VeleroCredentialsRestoreName },
-				timeout, interval)
-			// Get the restore to access the credentials restore name
-			Eventually(func() error {
-				return k8sClient.Get(ctx, restoreLookupKey, &createdRestore)
-			}, timeout, interval).Should(Succeed())
+		// This context tests the automatic backup selection functionality when the restore
+		// is configured to use "latest" backups instead of specific backup names. It validates
+		// that the controller correctly identifies and selects the most recent backups
+		// based on timestamps and availability.
+		Context("when creating restore with backup names set to latest", func() {
+			BeforeEach(func() {
+				veleroNamespace = createNamespace("velero-restore-ns-2")
+				backupStorageLocation = createStorageLocation("default", veleroNamespace.Name).
+					setOwner().
+					phase(veleroapi.BackupStorageLocationPhaseAvailable).object
 
-			// Step 2: Verify other restores are NOT created yet
-			// The controller waits for credentials restore to complete before creating others
-			// This ensures proper restoration order and prevents permission issues
-			Expect(createdRestore.Status.VeleroGenericResourcesRestoreName).To(BeEmpty())
-			Expect(createdRestore.Status.VeleroResourcesRestoreName).To(BeEmpty())
-			Expect(createdRestore.Status.VeleroManagedClustersRestoreName).To(BeEmpty())
+				rhacmRestore = *createACMRestore(restoreName, veleroNamespace.Name).
+					cleanupBeforeRestore(v1beta1.CleanupTypeRestored).syncRestoreWithNewBackups(true).
+					restoreSyncInterval(metav1.Duration{Duration: time.Minute * 20}).
+					veleroManagedClustersBackupName(skipRestore).
+					veleroCredentialsBackupName(latestBackup).
+					veleroResourcesBackupName(latestBackup).object
 
-			// Update credentials veleroRestore status to fake out a completed velero restore
-			veleroCredentialsRestore := &veleroapi.Restore{}
-			Expect(k8sClient.Get(ctx,
-				types.NamespacedName{Name: createdRestore.Status.VeleroCredentialsRestoreName, Namespace: veleroNamespace.Name},
-				veleroCredentialsRestore)).To(Succeed())
-			// Set status to completed
-			veleroCredentialsRestore.Status = veleroapi.RestoreStatus{
-				Phase: veleroapi.RestorePhaseCompleted,
-			}
-			// Velero CRD doesn't have status subresource set, so simply update the
-			// status with a normal update() call.
-			Expect(k8sClient.Update(ctx, veleroCredentialsRestore)).To(Succeed())
-			// Expect(k8sClient.Status().Update(ctx, veleroCredentialsRestore)).To(Succeed())
+				oneHourAgo := metav1.NewTime(time.Now().Add(-1 * time.Hour))
+				twoHoursAgo := metav1.NewTime(time.Now().Add(-2 * time.Hour))
+				threeHoursAgo := metav1.NewTime(time.Now().Add(-3 * time.Hour))
+				fourHoursAgo := metav1.NewTime(time.Now().Add(-4 * time.Hour))
+				veleroBackups = []veleroapi.Backup{
+					*createBackup("acm-managed-clusters-schedule-good-old-backup", veleroNamespace.Name).
+						includedResources(backupManagedClusterResources).
+						phase(veleroapi.BackupPhaseCompleted).
+						errors(0).startTimestamp(threeHoursAgo).
+						object,
+					*createBackup("acm-managed-clusters-schedule-good-recent-backup", veleroNamespace.Name).
+						includedResources(backupManagedClusterResources).
+						phase(veleroapi.BackupPhaseCompleted).
+						errors(0).startTimestamp(twoHoursAgo).
+						object,
+					*createBackup("acm-managed-clusters-schedule-not-completed-recent-backup", veleroNamespace.Name).
+						includedResources(backupManagedClusterResources).
+						phase(veleroapi.BackupPhaseFailed).
+						errors(0).startTimestamp(oneHourAgo).
+						object,
+					*createBackup("acm-managed-clusters-schedule-bad-old-backup", veleroNamespace.Name).
+						includedResources(backupManagedClusterResources).
+						phase(veleroapi.BackupPhaseCompleted).
+						errors(10).startTimestamp(fourHoursAgo).
+						object,
+					// acm-resources backups
+					*createBackup("acm-resources-schedule-good-old-backup", veleroNamespace.Name).
+						includedResources(includedResources).
+						phase(veleroapi.BackupPhaseCompleted).
+						errors(0).startTimestamp(threeHoursAgo).
+						object,
+					*createBackup("acm-resources-generic-schedule-good-old-backup", veleroNamespace.Name).
+						includedResources(includedResources).
+						phase(veleroapi.BackupPhaseCompleted).
+						errors(0).startTimestamp(threeHoursAgo).
+						object,
+					*createBackup("acm-resources-schedule-good-recent-backup", veleroNamespace.Name).
+						includedResources(includedResources).
+						phase(veleroapi.BackupPhaseCompleted).
+						errors(0).startTimestamp(twoHoursAgo).
+						object,
+					*createBackup("acm-resources-schedule-not-completed-recent-backup", veleroNamespace.Name).
+						includedResources(includedResources).
+						phase(veleroapi.BackupPhaseFailed).
+						errors(0).startTimestamp(oneHourAgo).
+						object,
+					*createBackup("acm-resources-schedule-bad-old-backup", veleroNamespace.Name).
+						includedResources(includedResources).
+						phase(veleroapi.BackupPhaseCompleted).
+						errors(10).startTimestamp(fourHoursAgo).
+						object,
+					*createBackup("acm-resources-generic-schedule-bad-old-backup", veleroNamespace.Name).
+						includedResources(includedResources).
+						phase(veleroapi.BackupPhaseCompleted).
+						errors(10).startTimestamp(fourHoursAgo).
+						object,
+					// acm-credentials-schedule backups
+					*createBackup("acm-credentials-schedule-good-old-backup", veleroNamespace.Name).
+						includedResources(backupCredsResources).
+						phase(veleroapi.BackupPhaseCompleted).
+						errors(0).startTimestamp(threeHoursAgo).
+						object,
+					*createBackup("acm-credentials-schedule-good-recent-backup", veleroNamespace.Name).
+						includedResources(backupCredsResources).
+						phase(veleroapi.BackupPhaseCompleted).
+						errors(0).startTimestamp(twoHoursAgo).
+						object,
+					*createBackup("acm-credentials-schedule-not-completed-recent-backup", veleroNamespace.Name).
+						includedResources(backupCredsResources).
+						phase(veleroapi.BackupPhaseInProgress).
+						errors(0).startTimestamp(oneHourAgo).
+						object,
+					*createBackup("acm-credentials-schedule-bad-old-backup", veleroNamespace.Name).
+						includedResources(backupCredsResources).
+						phase(veleroapi.BackupPhaseCompleted).
+						errors(10).startTimestamp(fourHoursAgo).
+						object,
+					*createBackup("acm-credentials-hive-schedule-good-recent-backup", veleroNamespace.Name).
+						includedResources(backupCredsResources).
+						phase(veleroapi.BackupPhaseCompleted).
+						errors(0).startTimestamp(twoHoursAgo).
+						object,
+					*createBackup("acm-credentials-cluster-schedule-good-recent-backup", veleroNamespace.Name).
+						includedResources(backupCredsResources).
+						phase(veleroapi.BackupPhaseCompleted).
+						errors(0).startTimestamp(twoHoursAgo).
+						object,
+				}
+			})
+			It("should automatically select the most recent available backups", func() {
+				By("created restore should contain velero restore in status")
+				waitForRestoreStatusFieldEmpty(ctx, k8sClient, restoreName, veleroNamespace.Name,
+					func(r *v1beta1.Restore) string { return r.Status.VeleroManagedClustersRestoreName },
+					timeout, interval)
+				waitForRestoreStatusFieldNonEmpty(ctx, k8sClient, restoreName, veleroNamespace.Name,
+					func(r *v1beta1.Restore) string { return r.Status.VeleroCredentialsRestoreName },
+					timeout, interval)
+				waitForRestoreStatusFieldNonEmpty(ctx, k8sClient, restoreName, veleroNamespace.Name,
+					func(r *v1beta1.Restore) string { return r.Status.VeleroResourcesRestoreName },
+					timeout, interval)
 
-			// Now that the credentials restore is done (we faked it was complete in the
-			// velero restore status), other restores should be created
-			Eventually(func() bool {
-				err := k8sClient.Get(ctx, restoreLookupKey, &createdRestore)
-				if err != nil {
-					return false
+				veleroRestore := veleroapi.Restore{}
+				Expect(k8sClient.Get(ctx,
+					createLookupKey(restoreName+"-acm-credentials-schedule-good-recent-backup", veleroNamespace.Name),
+					&veleroRestore)).ShouldNot(HaveOccurred())
+				Expect(k8sClient.Get(ctx,
+					createLookupKey(restoreName+"-acm-resources-schedule-good-recent-backup", veleroNamespace.Name),
+					&veleroRestore)).ShouldNot(HaveOccurred())
+			})
+		})
+	}) // End of basic restore functionality
+
+	// =============================================================================
+	// ADVANCED FEATURES TESTS
+	// =============================================================================
+	//
+	// This section tests advanced restore features including dynamic sync operations,
+	// selective backup skipping, and status lifecycle management.
+
+	// Test Context Group: Advanced Restore Features
+	//
+	// This group tests sophisticated restore capabilities beyond basic functionality.
+	Context("advanced restore features", func() {
+
+		// Test Context: Dynamic Sync Operations
+		//
+		// This context tests the dynamic sync functionality where the restore continuously
+		// monitors for new backups and automatically syncs with them. This is useful for
+		// disaster recovery scenarios where you want ongoing synchronization with the
+		// latest backup data.
+		Context("when creating restore with sync option enabled", func() {
+			BeforeEach(func() {
+				veleroNamespace = createNamespace("velero-restore-ns-9")
+				backupStorageLocation = createStorageLocation("default", veleroNamespace.Name).
+					setOwner().
+					phase(veleroapi.BackupStorageLocationPhaseAvailable).object
+				rhacmRestore = *createACMRestore(restoreName, veleroNamespace.Name).
+					cleanupBeforeRestore(v1beta1.CleanupTypeRestored).syncRestoreWithNewBackups(true).
+					veleroManagedClustersBackupName(skipRestore).
+					veleroCredentialsBackupName(latestBackup).
+					veleroResourcesBackupName(latestBackup).object
+
+				oneHourAgo := metav1.NewTime(time.Now().Add(-1 * time.Hour))
+				threeHoursAgo := metav1.NewTime(time.Now().Add(-3 * time.Hour))
+				fourHoursAgo := metav1.NewTime(time.Now().Add(-4 * time.Hour))
+				veleroBackups = []veleroapi.Backup{
+					*createBackup("acm-managed-clusters-schedule-good-old-backup", veleroNamespace.Name).
+						includedResources(backupManagedClusterResources).
+						phase(veleroapi.BackupPhaseCompleted).
+						errors(0).startTimestamp(threeHoursAgo).
+						object,
+					*createBackup("acm-managed-clusters-schedule-not-completed-recent-backup", veleroNamespace.Name).
+						includedResources(backupManagedClusterResources).
+						phase(veleroapi.BackupPhaseFailed).
+						errors(0).startTimestamp(oneHourAgo).
+						object,
+					*createBackup("acm-managed-clusters-schedule-bad-old-backup", veleroNamespace.Name).
+						includedResources(backupManagedClusterResources).
+						phase(veleroapi.BackupPhaseCompleted).
+						errors(10).startTimestamp(fourHoursAgo).
+						object,
+					// acm-resources-schedule backups
+					*createBackup("acm-resources-schedule-good-old-backup", veleroNamespace.Name).
+						includedResources(includedResources).
+						phase(veleroapi.BackupPhaseCompleted).
+						errors(0).startTimestamp(threeHoursAgo).
+						object,
+					*createBackup("acm-resources-schedule-not-completed-recent-backup", veleroNamespace.Name).
+						includedResources(includedResources).
+						phase(veleroapi.BackupPhaseFailed).
+						errors(0).startTimestamp(oneHourAgo).
+						object,
+					*createBackup("acm-resources-schedule-bad-old-backup", veleroNamespace.Name).
+						includedResources(includedResources).
+						phase(veleroapi.BackupPhaseCompleted).
+						errors(10).startTimestamp(fourHoursAgo).
+						object,
+					// acm-credentials-schedule backups
+					*createBackup("acm-credentials-schedule-good-old-backup", veleroNamespace.Name).
+						includedResources(backupCredsResources).
+						phase(veleroapi.BackupPhaseCompleted).
+						errors(0).startTimestamp(threeHoursAgo).
+						object,
+					*createBackup("acm-credentials-schedule-not-completed-recent-backup", veleroNamespace.Name).
+						includedResources(backupCredsResources).
+						phase(veleroapi.BackupPhaseInProgress).
+						errors(0).startTimestamp(oneHourAgo).
+						object,
+					*createBackup("acm-credentials-schedule-bad-old-backup", veleroNamespace.Name).
+						includedResources(backupCredsResources).
+						phase(veleroapi.BackupPhaseCompleted).
+						errors(10).startTimestamp(fourHoursAgo).
+						object,
+				}
+			})
+			It("should continuously sync with new backups when sync option is enabled", func() {
+				createdRestore := v1beta1.Restore{}
+				restoreLookupKey := createLookupKey(restoreName, veleroNamespace.Name)
+				By("created restore should contain velero restore in status")
+				waitForRestoreStatusFieldValue(ctx, k8sClient, restoreName, veleroNamespace.Name,
+					func(r *v1beta1.Restore) string { return r.Status.VeleroCredentialsRestoreName },
+					"rhacm-restore-1-acm-credentials-schedule-good-old-backup", timeout, interval)
+				waitForRestoreStatusFieldValue(ctx, k8sClient, restoreName, veleroNamespace.Name,
+					func(r *v1beta1.Restore) string { return r.Status.VeleroResourcesRestoreName },
+					"rhacm-restore-1-acm-resources-schedule-good-old-backup", timeout, interval)
+
+				waitForRestorePhase(ctx, k8sClient, restoreName, veleroNamespace.Name, v1beta1.RestorePhaseUnknown, timeout, interval)
+
+				verifyVeleroRestoreExists(ctx, k8sClient, restoreName+"-acm-credentials-schedule-good-old-backup", veleroNamespace.Name)
+				verifyVeleroRestoreExists(ctx, k8sClient, restoreName+"-acm-resources-schedule-good-old-backup", veleroNamespace.Name)
+
+				// Declare veleroRestore for later use
+				veleroRestore := veleroapi.Restore{}
+
+				twoHoursAgo := metav1.NewTime(time.Now().Add(-2 * time.Hour))
+				newVeleroBackups := []veleroapi.Backup{
+					*createBackup("acm-credentials-schedule-good-recent-backup", veleroNamespace.Name).
+						includedResources(backupCredsResources).
+						phase(veleroapi.BackupPhaseCompleted).
+						errors(0).startTimestamp(twoHoursAgo).
+						object,
+					*createBackup("acm-resources-schedule-good-recent-backup", veleroNamespace.Name).
+						includedResources(includedResources).
+						phase(veleroapi.BackupPhaseCompleted).
+						errors(0).startTimestamp(twoHoursAgo).
+						object,
+					*createBackup("acm-managed-clusters-schedule-good-recent-backup", veleroNamespace.Name).
+						includedResources(backupManagedClusterResources).
+						phase(veleroapi.BackupPhaseCompleted).
+						errors(0).startTimestamp(twoHoursAgo).
+						object,
+					*createBackup("acm-resources-generic-schedule-good-recent-backup", veleroNamespace.Name).
+						includedResources(backupManagedClusterResources).
+						phase(veleroapi.BackupPhaseCompleted).
+						errors(0).startTimestamp(twoHoursAgo).
+						object,
 				}
 
-				// Fail immediately if we see either of these phases - means we have a timing
-				// issue and have incorrectly upated the status before all restores are done
-				Expect(createdRestore.Status.Phase).NotTo(Equal(v1beta1.RestorePhaseFinished))
-				Expect(createdRestore.Status.Phase).NotTo(Equal(v1beta1.RestoreComplete))
-				Expect(createdRestore.Status.CompletionTimestamp).Should(BeNil())
+				// create new backups to sync with
+				resources := make([]client.Object, len(newVeleroBackups))
+				for i := range newVeleroBackups {
+					resources[i] = &newVeleroBackups[i]
+				}
+				createAndVerifyResources(ctx, k8sClient, resources)
 
-				return createdRestore.Status.VeleroGenericResourcesRestoreName != "" &&
-					createdRestore.Status.VeleroResourcesRestoreName != "" &&
-					createdRestore.Status.VeleroManagedClustersRestoreName != ""
-			}, timeout, interval).Should(BeTrue())
+				Eventually(func() string {
+					if err := k8sClient.Get(ctx, restoreLookupKey, &createdRestore); err == nil {
+						// update createdRestore status to Enabled
+						createdRestore.Status.Phase = v1beta1.RestorePhaseEnabled
+						Expect(k8sClient.Status().Update(ctx, &createdRestore)).Should(Succeed())
+						return string(createdRestore.Status.Phase)
+					}
+					return "notset"
+				}, timeout, interval).Should(BeIdenticalTo(v1beta1.RestorePhaseEnabled))
 
-			Consistently(func() bool {
-				// Make sure acm restore status never goes to finished or complete as the other velero restores
-				// are not done (status is "" which we interpret as "Unknown")
+				// now trigger a resource update by setting sync option to true
 				Expect(k8sClient.Get(ctx, restoreLookupKey, &createdRestore)).To(Succeed())
-				logger.Info("velero restores running", "createdRestore.Status.Phase", createdRestore.Status.Phase)
-				return createdRestore.Status.Phase == v1beta1.RestorePhaseFinished ||
-					createdRestore.Status.Phase == v1beta1.RestoreComplete
-			}, 2*time.Second, interval).Should(BeFalse())
-
-			backupNames := []string{
-				veleroManagedClustersBackupName,
-				veleroResourcesBackupName,
-				veleroResourcesGenericBackupName,
-				veleroCredentialsBackupName,
-				veleroCredentialsHiveBackupName,
-				veleroCredentialsClusterBackupName,
-			}
-			waitForVeleroRestoreCount(ctx, k8sClient, veleroNamespace.Name, len(backupNames), timeout, interval)
-
-			// Get the velero restores for further validation
-			veleroRestores := veleroapi.RestoreList{}
-			Expect(k8sClient.List(ctx, &veleroRestores, client.InNamespace(veleroNamespace.Name))).To(Succeed())
-
-			req1 := metav1.LabelSelectorRequirement{
-				Key:      "foo",
-				Operator: metav1.LabelSelectorOperator("In"),
-				Values:   []string{"bar"},
-			}
-			req2 := metav1.LabelSelectorRequirement{
-				Key:      "foo2",
-				Operator: metav1.LabelSelectorOperator("NotIn"),
-				Values:   []string{"bar2"},
-			}
-
-			restoreNames := []string{}
-			for i := range backupNames {
-				// look for velero optional properties
-				Expect(*veleroRestores.Items[i].Spec.RestorePVs).Should(BeTrue())
-				Expect(*veleroRestores.Items[i].Spec.PreserveNodePorts).Should(BeTrue())
-				Expect(veleroRestores.Items[i].Spec.RestoreStatus.IncludedResources[0]).
-					Should(BeIdenticalTo("webhook"))
-				Expect(veleroRestores.Items[i].Spec.Hooks.Resources[0].Name).Should(
-					BeIdenticalTo("hookName"))
-				Expect(veleroRestores.Items[i].Spec.ExcludedNamespaces).Should(
-					ContainElement("ns1"))
-				Expect(veleroRestores.Items[i].Spec.IncludedNamespaces).Should(
-					ContainElement("ns3"))
-				Expect(veleroRestores.Items[i].Spec.NamespaceMapping["ns3"]).Should(
-					BeIdenticalTo("map-ns3"))
-				Expect(veleroRestores.Items[i].Spec.IncludedNamespaces).Should(
-					ContainElement("ns4"))
-				Expect(veleroRestores.Items[i].Spec.IncludedNamespaces).Should(
-					ContainElement("ns4"))
-				Expect(veleroRestores.Items[i].Spec.ExcludedResources).Should(
-					ContainElement("res1"))
-				Expect(veleroRestores.Items[i].Spec.IncludedResources).Should(
-					ContainElement("res3"))
-				Expect(veleroRestores.Items[i].Spec.IncludedResources).Should(
-					ContainElement("res4"))
-				Expect(veleroRestores.Items[i].Spec.LabelSelector.MatchLabels["restorelabel"]).Should(
-					BeIdenticalTo("value"))
-				Expect(veleroRestores.Items[i].Spec.LabelSelector.MatchExpressions).Should(
-					ContainElement(req1))
-				Expect(veleroRestores.Items[i].Spec.LabelSelector.MatchExpressions).Should(
-					ContainElement(req2))
-
-				// should use the OrLabelSelectors
-				Expect(veleroRestores.Items[i].Spec.OrLabelSelectors[0].MatchLabels["restore-test-1"]).Should(
-					BeIdenticalTo("restore-test-1-value"))
-				Expect(veleroRestores.Items[i].Spec.OrLabelSelectors[1].MatchLabels["restore-test-2"]).Should(
-					BeIdenticalTo("restore-test-2-value"))
-
-				_, found := find(backupNames, veleroRestores.Items[i].Spec.BackupName)
-				Expect(found).Should(BeTrue())
-
-				restoreNames = append(restoreNames, veleroRestores.Items[i].GetName())
-			}
-
-			// Now update all the velero restores to simulate that they are complete
-			updateVeleroRestoreStatusToCompleted(ctx, k8sClient, restoreNames, veleroNamespace.Name, timeout, interval)
-
-			// TODO: there's a lot more steps in the restore that could be
-			// tested here
-
-			// Now the acm restore should proceed to Finished phase
-			waitForRestorePhase(ctx, k8sClient, restoreName, veleroNamespace.Name, v1beta1.RestorePhaseFinished, timeout, interval)
-			// When acm restore is finished CompletionTimestamp should be set
-			waitForCompletionTimestamp(ctx, k8sClient, restoreName, veleroNamespace.Name, timeout, interval)
-		})
-	})
-
-	// Test Context: Latest Backup Selection Logic
-	//
-	// This context tests the automatic backup selection functionality when the restore
-	// is configured to use "latest" backups instead of specific backup names. It validates
-	// that the controller correctly identifies and selects the most recent backups
-	// based on timestamps and availability.
-	Context("when creating restore with backup names set to latest", func() {
-		BeforeEach(func() {
-			veleroNamespace = createNamespace("velero-restore-ns-2")
-			backupStorageLocation = createStorageLocation("default", veleroNamespace.Name).
-				setOwner().
-				phase(veleroapi.BackupStorageLocationPhaseAvailable).object
-
-			rhacmRestore = *createACMRestore(restoreName, veleroNamespace.Name).
-				cleanupBeforeRestore(v1beta1.CleanupTypeRestored).syncRestoreWithNewBackups(true).
-				restoreSyncInterval(metav1.Duration{Duration: time.Minute * 20}).
-				veleroManagedClustersBackupName(skipRestore).
-				veleroCredentialsBackupName(latestBackup).
-				veleroResourcesBackupName(latestBackup).object
-
-			oneHourAgo := metav1.NewTime(time.Now().Add(-1 * time.Hour))
-			twoHoursAgo := metav1.NewTime(time.Now().Add(-2 * time.Hour))
-			threeHoursAgo := metav1.NewTime(time.Now().Add(-3 * time.Hour))
-			fourHoursAgo := metav1.NewTime(time.Now().Add(-4 * time.Hour))
-			veleroBackups = []veleroapi.Backup{
-				*createBackup("acm-managed-clusters-schedule-good-old-backup", veleroNamespace.Name).
-					includedResources(backupManagedClusterResources).
-					phase(veleroapi.BackupPhaseCompleted).
-					errors(0).startTimestamp(threeHoursAgo).
-					object,
-				*createBackup("acm-managed-clusters-schedule-good-recent-backup", veleroNamespace.Name).
-					includedResources(backupManagedClusterResources).
-					phase(veleroapi.BackupPhaseCompleted).
-					errors(0).startTimestamp(twoHoursAgo).
-					object,
-				*createBackup("acm-managed-clusters-schedule-not-completed-recent-backup", veleroNamespace.Name).
-					includedResources(backupManagedClusterResources).
-					phase(veleroapi.BackupPhaseFailed).
-					errors(0).startTimestamp(oneHourAgo).
-					object,
-				*createBackup("acm-managed-clusters-schedule-bad-old-backup", veleroNamespace.Name).
-					includedResources(backupManagedClusterResources).
-					phase(veleroapi.BackupPhaseCompleted).
-					errors(10).startTimestamp(fourHoursAgo).
-					object,
-				// acm-resources backups
-				*createBackup("acm-resources-schedule-good-old-backup", veleroNamespace.Name).
-					includedResources(includedResources).
-					phase(veleroapi.BackupPhaseCompleted).
-					errors(0).startTimestamp(threeHoursAgo).
-					object,
-				*createBackup("acm-resources-generic-schedule-good-old-backup", veleroNamespace.Name).
-					includedResources(includedResources).
-					phase(veleroapi.BackupPhaseCompleted).
-					errors(0).startTimestamp(threeHoursAgo).
-					object,
-				*createBackup("acm-resources-schedule-good-recent-backup", veleroNamespace.Name).
-					includedResources(includedResources).
-					phase(veleroapi.BackupPhaseCompleted).
-					errors(0).startTimestamp(twoHoursAgo).
-					object,
-				*createBackup("acm-resources-schedule-not-completed-recent-backup", veleroNamespace.Name).
-					includedResources(includedResources).
-					phase(veleroapi.BackupPhaseFailed).
-					errors(0).startTimestamp(oneHourAgo).
-					object,
-				*createBackup("acm-resources-schedule-bad-old-backup", veleroNamespace.Name).
-					includedResources(includedResources).
-					phase(veleroapi.BackupPhaseCompleted).
-					errors(10).startTimestamp(fourHoursAgo).
-					object,
-				*createBackup("acm-resources-generic-schedule-bad-old-backup", veleroNamespace.Name).
-					includedResources(includedResources).
-					phase(veleroapi.BackupPhaseCompleted).
-					errors(10).startTimestamp(fourHoursAgo).
-					object,
-				// acm-credentials-schedule backups
-				*createBackup("acm-credentials-schedule-good-old-backup", veleroNamespace.Name).
-					includedResources(backupCredsResources).
-					phase(veleroapi.BackupPhaseCompleted).
-					errors(0).startTimestamp(threeHoursAgo).
-					object,
-				*createBackup("acm-credentials-schedule-good-recent-backup", veleroNamespace.Name).
-					includedResources(backupCredsResources).
-					phase(veleroapi.BackupPhaseCompleted).
-					errors(0).startTimestamp(twoHoursAgo).
-					object,
-				*createBackup("acm-credentials-schedule-not-completed-recent-backup", veleroNamespace.Name).
-					includedResources(backupCredsResources).
-					phase(veleroapi.BackupPhaseInProgress).
-					errors(0).startTimestamp(oneHourAgo).
-					object,
-				*createBackup("acm-credentials-schedule-bad-old-backup", veleroNamespace.Name).
-					includedResources(backupCredsResources).
-					phase(veleroapi.BackupPhaseCompleted).
-					errors(10).startTimestamp(fourHoursAgo).
-					object,
-				*createBackup("acm-credentials-hive-schedule-good-recent-backup", veleroNamespace.Name).
-					includedResources(backupCredsResources).
-					phase(veleroapi.BackupPhaseCompleted).
-					errors(0).startTimestamp(twoHoursAgo).
-					object,
-				*createBackup("acm-credentials-cluster-schedule-good-recent-backup", veleroNamespace.Name).
-					includedResources(backupCredsResources).
-					phase(veleroapi.BackupPhaseCompleted).
-					errors(0).startTimestamp(twoHoursAgo).
-					object,
-			}
-		})
-		It("should automatically select the most recent available backups", func() {
-			By("created restore should contain velero restore in status")
-			waitForRestoreStatusFieldEmpty(ctx, k8sClient, restoreName, veleroNamespace.Name,
-				func(r *v1beta1.Restore) string { return r.Status.VeleroManagedClustersRestoreName },
-				timeout, interval)
-			waitForRestoreStatusFieldNonEmpty(ctx, k8sClient, restoreName, veleroNamespace.Name,
-				func(r *v1beta1.Restore) string { return r.Status.VeleroCredentialsRestoreName },
-				timeout, interval)
-			waitForRestoreStatusFieldNonEmpty(ctx, k8sClient, restoreName, veleroNamespace.Name,
-				func(r *v1beta1.Restore) string { return r.Status.VeleroResourcesRestoreName },
-				timeout, interval)
-
-			veleroRestore := veleroapi.Restore{}
-			Expect(k8sClient.Get(ctx,
-				createLookupKey(restoreName+"-acm-credentials-schedule-good-recent-backup", veleroNamespace.Name),
-				&veleroRestore)).ShouldNot(HaveOccurred())
-			Expect(k8sClient.Get(ctx,
-				createLookupKey(restoreName+"-acm-resources-schedule-good-recent-backup", veleroNamespace.Name),
-				&veleroRestore)).ShouldNot(HaveOccurred())
-		})
-	})
-
-	// Test Context: Dynamic Sync Operations
-	//
-	// This context tests the dynamic sync functionality where the restore continuously
-	// monitors for new backups and automatically syncs with them. This is useful for
-	// disaster recovery scenarios where you want ongoing synchronization with the
-	// latest backup data.
-	Context("when creating restore with sync option enabled", func() {
-		BeforeEach(func() {
-			veleroNamespace = createNamespace("velero-restore-ns-9")
-			backupStorageLocation = createStorageLocation("default", veleroNamespace.Name).
-				setOwner().
-				phase(veleroapi.BackupStorageLocationPhaseAvailable).object
-			rhacmRestore = *createACMRestore(restoreName, veleroNamespace.Name).
-				cleanupBeforeRestore(v1beta1.CleanupTypeRestored).syncRestoreWithNewBackups(true).
-				veleroManagedClustersBackupName(skipRestore).
-				veleroCredentialsBackupName(latestBackup).
-				veleroResourcesBackupName(latestBackup).object
-
-			oneHourAgo := metav1.NewTime(time.Now().Add(-1 * time.Hour))
-			threeHoursAgo := metav1.NewTime(time.Now().Add(-3 * time.Hour))
-			fourHoursAgo := metav1.NewTime(time.Now().Add(-4 * time.Hour))
-			veleroBackups = []veleroapi.Backup{
-				*createBackup("acm-managed-clusters-schedule-good-old-backup", veleroNamespace.Name).
-					includedResources(backupManagedClusterResources).
-					phase(veleroapi.BackupPhaseCompleted).
-					errors(0).startTimestamp(threeHoursAgo).
-					object,
-				*createBackup("acm-managed-clusters-schedule-not-completed-recent-backup", veleroNamespace.Name).
-					includedResources(backupManagedClusterResources).
-					phase(veleroapi.BackupPhaseFailed).
-					errors(0).startTimestamp(oneHourAgo).
-					object,
-				*createBackup("acm-managed-clusters-schedule-bad-old-backup", veleroNamespace.Name).
-					includedResources(backupManagedClusterResources).
-					phase(veleroapi.BackupPhaseCompleted).
-					errors(10).startTimestamp(fourHoursAgo).
-					object,
-				// acm-resources-schedule backups
-				*createBackup("acm-resources-schedule-good-old-backup", veleroNamespace.Name).
-					includedResources(includedResources).
-					phase(veleroapi.BackupPhaseCompleted).
-					errors(0).startTimestamp(threeHoursAgo).
-					object,
-				*createBackup("acm-resources-schedule-not-completed-recent-backup", veleroNamespace.Name).
-					includedResources(includedResources).
-					phase(veleroapi.BackupPhaseFailed).
-					errors(0).startTimestamp(oneHourAgo).
-					object,
-				*createBackup("acm-resources-schedule-bad-old-backup", veleroNamespace.Name).
-					includedResources(includedResources).
-					phase(veleroapi.BackupPhaseCompleted).
-					errors(10).startTimestamp(fourHoursAgo).
-					object,
-				// acm-credentials-schedule backups
-				*createBackup("acm-credentials-schedule-good-old-backup", veleroNamespace.Name).
-					includedResources(backupCredsResources).
-					phase(veleroapi.BackupPhaseCompleted).
-					errors(0).startTimestamp(threeHoursAgo).
-					object,
-				*createBackup("acm-credentials-schedule-not-completed-recent-backup", veleroNamespace.Name).
-					includedResources(backupCredsResources).
-					phase(veleroapi.BackupPhaseInProgress).
-					errors(0).startTimestamp(oneHourAgo).
-					object,
-				*createBackup("acm-credentials-schedule-bad-old-backup", veleroNamespace.Name).
-					includedResources(backupCredsResources).
-					phase(veleroapi.BackupPhaseCompleted).
-					errors(10).startTimestamp(fourHoursAgo).
-					object,
-			}
-		})
-		It("should continuously sync with new backups when sync option is enabled", func() {
-			createdRestore := v1beta1.Restore{}
-			restoreLookupKey := createLookupKey(restoreName, veleroNamespace.Name)
-			By("created restore should contain velero restore in status")
-			waitForRestoreStatusFieldValue(ctx, k8sClient, restoreName, veleroNamespace.Name,
-				func(r *v1beta1.Restore) string { return r.Status.VeleroCredentialsRestoreName },
-				"rhacm-restore-1-acm-credentials-schedule-good-old-backup", timeout, interval)
-			waitForRestoreStatusFieldValue(ctx, k8sClient, restoreName, veleroNamespace.Name,
-				func(r *v1beta1.Restore) string { return r.Status.VeleroResourcesRestoreName },
-				"rhacm-restore-1-acm-resources-schedule-good-old-backup", timeout, interval)
-
-			waitForRestorePhase(ctx, k8sClient, restoreName, veleroNamespace.Name, v1beta1.RestorePhaseUnknown, timeout, interval)
-
-			verifyVeleroRestoreExists(ctx, k8sClient, restoreName+"-acm-credentials-schedule-good-old-backup", veleroNamespace.Name)
-			verifyVeleroRestoreExists(ctx, k8sClient, restoreName+"-acm-resources-schedule-good-old-backup", veleroNamespace.Name)
-
-			// Declare veleroRestore for later use
-			veleroRestore := veleroapi.Restore{}
-
-			twoHoursAgo := metav1.NewTime(time.Now().Add(-2 * time.Hour))
-			newVeleroBackups := []veleroapi.Backup{
-				*createBackup("acm-credentials-schedule-good-recent-backup", veleroNamespace.Name).
-					includedResources(backupCredsResources).
-					phase(veleroapi.BackupPhaseCompleted).
-					errors(0).startTimestamp(twoHoursAgo).
-					object,
-				*createBackup("acm-resources-schedule-good-recent-backup", veleroNamespace.Name).
-					includedResources(includedResources).
-					phase(veleroapi.BackupPhaseCompleted).
-					errors(0).startTimestamp(twoHoursAgo).
-					object,
-				*createBackup("acm-managed-clusters-schedule-good-recent-backup", veleroNamespace.Name).
-					includedResources(backupManagedClusterResources).
-					phase(veleroapi.BackupPhaseCompleted).
-					errors(0).startTimestamp(twoHoursAgo).
-					object,
-				*createBackup("acm-resources-generic-schedule-good-recent-backup", veleroNamespace.Name).
-					includedResources(backupManagedClusterResources).
-					phase(veleroapi.BackupPhaseCompleted).
-					errors(0).startTimestamp(twoHoursAgo).
-					object,
-			}
-
-			// create new backups to sync with
-			resources := make([]client.Object, len(newVeleroBackups))
-			for i := range newVeleroBackups {
-				resources[i] = &newVeleroBackups[i]
-			}
-			createAndVerifyResources(ctx, k8sClient, resources)
-
-			Eventually(func() string {
-				if err := k8sClient.Get(ctx, restoreLookupKey, &createdRestore); err == nil {
-					// update createdRestore status to Enabled
-					createdRestore.Status.Phase = v1beta1.RestorePhaseEnabled
-					Expect(k8sClient.Status().Update(ctx, &createdRestore)).Should(Succeed())
-					return string(createdRestore.Status.Phase)
-				}
-				return "notset"
-			}, timeout, interval).Should(BeIdenticalTo(v1beta1.RestorePhaseEnabled))
-
-			// now trigger a resource update by setting sync option to true
-			Expect(k8sClient.Get(ctx, restoreLookupKey, &createdRestore)).To(Succeed())
-			createdRestore.Spec.SyncRestoreWithNewBackups = true
-			Expect(k8sClient.Update(ctx, &createdRestore)).Should(Succeed())
-
-			By("created restore should now contain new velero backup names in status")
-			waitForRestoreStatusFieldValue(ctx, k8sClient, restoreName, veleroNamespace.Name,
-				func(r *v1beta1.Restore) string { return r.Status.VeleroCredentialsRestoreName },
-				"rhacm-restore-1-acm-credentials-schedule-good-recent-backup", timeout, interval)
-			waitForRestoreStatusFieldValue(ctx, k8sClient, restoreName, veleroNamespace.Name,
-				func(r *v1beta1.Restore) string { return r.Status.VeleroResourcesRestoreName },
-				"rhacm-restore-1-acm-resources-schedule-good-recent-backup", timeout, interval)
-			// check if new velero restores are created
-			Expect(
-				k8sClient.Get(
-					ctx,
-					types.NamespacedName{
-						Namespace: veleroNamespace.Name,
-						Name:      restoreName + "-acm-credentials-schedule-good-recent-backup",
-					},
-					&veleroRestore,
-				),
-			).ShouldNot(HaveOccurred())
-			Expect(
-				k8sClient.Get(
-					ctx,
-					types.NamespacedName{
-						Namespace: veleroNamespace.Name,
-						Name:      restoreName + "-acm-resources-schedule-good-recent-backup",
-					},
-					&veleroRestore,
-				),
-			).ShouldNot(HaveOccurred())
-
-			// create a restore resource to test the collision path when trying to create the same restore
-			restoreResourceCollision := *createRestore(
-				"rhacm-restore-1-acm-resources-generic-schedule-good-old-backup", veleroNamespace.Name).
-				backupName("acm-resources-schedule-good-old-backup").
-				phase("Completed").
-				object
-
-			Expect(k8sClient.Create(ctx, &restoreResourceCollision)).Should(Succeed())
-
-			Expect(createdRestore.Spec.VeleroManagedClustersBackupName).Should(Equal(&skipRestore))
-
-			Eventually(func() string {
-				err := k8sClient.Get(ctx, restoreLookupKey, &createdRestore)
-				if err != nil {
-					return ""
-				}
-				// update createdRestore status to Enabled
-				createdRestore.Status.Phase = v1beta1.RestorePhaseEnabled
-				err = k8sClient.Status().Update(ctx, &createdRestore)
-				if err != nil {
-					return ""
-				}
-				return string(createdRestore.Status.Phase)
-			}, timeout, interval).Should(BeIdenticalTo(v1beta1.RestorePhaseEnabled))
-
-			// now trigger a resource update by setting VeleroManagedClustersBackupName to latest
-			// it should only restore the managed clusters and generic resources since
-			// there is no new backup for resources and credentials
-			if err := k8sClient.Get(ctx, restoreLookupKey, &createdRestore); err == nil {
-				createdRestore.Spec.VeleroManagedClustersBackupName = &latestBackup
+				createdRestore.Spec.SyncRestoreWithNewBackups = true
 				Expect(k8sClient.Update(ctx, &createdRestore)).Should(Succeed())
-			}
-		})
-	})
 
-	// Test Context: Selective Backup Skipping
-	//
-	// This context tests the ability to selectively skip certain types of backups
-	// during restore operations. This is useful when you only want to restore
-	// specific components (e.g., only credentials, only resources) rather than
-	// performing a complete restore.
-	Context("when creating restore with backup names set to skip", func() {
-		BeforeEach(func() {
-			veleroNamespace = createNamespace("velero-restore-ns-3")
-			backupStorageLocation = createStorageLocation("default", veleroNamespace.Name).
-				setOwner().
-				phase(veleroapi.BackupStorageLocationPhaseAvailable).object
-			rhacmRestore = *createACMRestore(restoreName, veleroNamespace.Name).
-				cleanupBeforeRestore(v1beta1.CleanupTypeNone).
-				veleroManagedClustersBackupName(skipRestore).
-				veleroCredentialsBackupName(skipRestore).
-				veleroResourcesBackupName(skipRestore).object
-
-			veleroBackups = []veleroapi.Backup{}
-		})
-		It("should skip backup restoration when configured with skip option", func() {
-			By("created restore should contain velero restore in status")
-			waitForRestoreStatusFieldEmpty(ctx, k8sClient, restoreName, veleroNamespace.Name,
-				func(r *v1beta1.Restore) string { return r.Status.VeleroManagedClustersRestoreName },
-				timeout, interval)
-			waitForRestoreStatusFieldEmpty(ctx, k8sClient, restoreName, veleroNamespace.Name,
-				func(r *v1beta1.Restore) string { return r.Status.VeleroCredentialsRestoreName },
-				timeout, interval)
-			waitForRestoreStatusFieldEmpty(ctx, k8sClient, restoreName, veleroNamespace.Name,
-				func(r *v1beta1.Restore) string { return r.Status.VeleroResourcesRestoreName },
-				timeout, interval)
-
-			veleroRestores := veleroapi.RestoreList{}
-			createdRestore := v1beta1.Restore{}
-			Eventually(func() bool {
-				if err := k8sClient.List(ctx, &veleroRestores, client.InNamespace(veleroNamespace.Name)); err != nil {
-					return false
-				}
-				return len(veleroRestores.Items) == 0
-			}, timeout, interval).Should(BeTrue())
-			Eventually(func() v1beta1.RestorePhase {
-				restoreLookupKey := types.NamespacedName{
-					Name:      restoreName,
-					Namespace: veleroNamespace.Name,
-				}
-				err := k8sClient.Get(ctx, restoreLookupKey, &createdRestore)
-				Expect(err).NotTo(HaveOccurred())
-				return createdRestore.Status.Phase
-			}, timeout, interval).Should(BeEquivalentTo(v1beta1.RestorePhaseFinished))
-
-			// createdRestore above has RestorePhaseFinished status
-			// the following restore should not be ignored
-			rhacmRestoreNotIgnoredButError := *createACMRestore(restoreName+"not-ignored-but-invalid", veleroNamespace.Name).
-				cleanupBeforeRestore("someInvalidValue").
-				veleroManagedClustersBackupName(skipRestore).
-				veleroCredentialsBackupName(skipRestore).
-				veleroResourcesBackupName(latestBackup).object
-
-			Expect(k8sClient.Create(ctx, &rhacmRestoreNotIgnoredButError)).Should(Succeed())
-			notIgnoredRestoreErr := v1beta1.Restore{}
-			Eventually(func() v1beta1.RestorePhase {
-				restoreLookupKey := types.NamespacedName{
-					Name:      restoreName + "not-ignored-but-invalid",
-					Namespace: veleroNamespace.Name,
-				}
-				err := k8sClient.Get(ctx, restoreLookupKey, &notIgnoredRestoreErr)
-				Expect(err).NotTo(HaveOccurred())
-				return notIgnoredRestoreErr.Status.Phase
-			}, timeout, interval).Should(BeEquivalentTo(v1beta1.RestorePhaseFinishedWithErrors))
-
-			// createdRestore above has RestorePhaseFinished status
-			// the following restore should not be ignored
-			rhacmRestoreNotIgnored := *createACMRestore(restoreName+"not-ignored", veleroNamespace.Name).
-				cleanupBeforeRestore(v1beta1.CleanupTypeNone).
-				veleroManagedClustersBackupName(skipRestore).
-				veleroCredentialsBackupName(skipRestore).
-				veleroResourcesBackupName(skipRestore).object
-
-			Expect(k8sClient.Create(ctx, &rhacmRestoreNotIgnored)).Should(Succeed())
-			notIgnoredRestore := v1beta1.Restore{}
-			Eventually(func() v1beta1.RestorePhase {
-				restoreLookupKey := types.NamespacedName{
-					Name:      restoreName + "not-ignored",
-					Namespace: veleroNamespace.Name,
-				}
-				err := k8sClient.Get(ctx, restoreLookupKey, &notIgnoredRestore)
-				Expect(err).NotTo(HaveOccurred())
-				return notIgnoredRestore.Status.Phase
-			}, timeout, interval).Should(BeEquivalentTo(v1beta1.RestorePhaseFinished))
-		})
-	})
-
-	// Test Context: Error Handling and Validation
-	//
-	// This context tests error handling scenarios where invalid backup names are
-	// provided. It validates that the controller properly detects and reports
-	// errors when referenced backups don't exist or are invalid.
-	Context("when creating restore with invalid backup name", func() {
-		BeforeEach(func() {
-			veleroNamespace = createNamespace("velero-restore-ns-4")
-
-			veleroBackups = []veleroapi.Backup{}
-			rhacmRestore = *createACMRestore(restoreName, veleroNamespace.Name).
-				cleanupBeforeRestore(v1beta1.CleanupTypeRestored).
-				veleroManagedClustersBackupName(latestBackup).
-				veleroCredentialsBackupName(invalidBackup).
-				veleroResourcesBackupName(latestBackup).object
-
-			backupStorageLocation = createStorageLocation("default", veleroNamespace.Name).
-				setOwner().
-				phase(veleroapi.BackupStorageLocationPhaseAvailable).object
-
-			oneHourAgo := metav1.NewTime(time.Now().Add(-1 * time.Hour))
-			veleroBackups = []veleroapi.Backup{
-				// acm-managed-clusters-schedule backups
-				*createBackup("acm-managed-clusters-schedule-gold-backup", veleroNamespace.Name).
-					phase(veleroapi.BackupPhaseCompleted).
-					errors(0).startTimestamp(oneHourAgo).
-					object,
-				*createBackup("acm-resources-schedule-gold-backup", veleroNamespace.Name).
-					phase(veleroapi.BackupPhaseCompleted).
-					errors(0).startTimestamp(oneHourAgo).
-					object,
-			}
-		})
-		It("should fail to create restore when backup names are invalid", func() {
-			waitForVeleroRestoreCount(ctx, k8sClient, veleroNamespace.Name, 0, timeout, interval)
-			waitForRestorePhase(ctx, k8sClient, restoreName, veleroNamespace.Name, v1beta1.RestorePhaseError, timeout, interval)
-
-			createdRestore := getRestoreWithRetry(ctx, k8sClient, restoreName, veleroNamespace.Name, timeout, interval)
-			Expect(
-				createdRestore.Status.LastMessage,
-			).Should(BeIdenticalTo("cannot find invalid-backup-name Velero Backup: " +
-				"Backup.velero.io \"invalid-backup-name\" not found"))
-
-			// createdRestore above is has RestorePhaseError status
-			// the following restore should be ignored
-			rhacmRestoreIgnored := *createACMRestore(restoreName+"ignored", veleroNamespace.Name).
-				cleanupBeforeRestore(v1beta1.CleanupTypeNone).
-				veleroManagedClustersBackupName(skipRestore).
-				veleroCredentialsBackupName(skipRestore).
-				veleroResourcesBackupName(skipRestore).object
-
-			Expect(k8sClient.Create(ctx, &rhacmRestoreIgnored)).Should(Succeed())
-			waitForRestorePhase(ctx, k8sClient, restoreName+"ignored", veleroNamespace.Name, v1beta1.RestorePhaseFinishedWithErrors, timeout, interval)
-		})
-	})
-
-	Context("when creating restore in wrong namespace", func() {
-		BeforeEach(func() {
-			veleroNamespace = createNamespace("velero-restore-ns-5")
-			backupStorageLocation = createStorageLocation("default-5", veleroNamespace.Name).
-				setOwner().
-				phase(veleroapi.BackupStorageLocationPhaseAvailable).object
-
-			acmNamespaceName = "acm-ns-1"
-			acmNamespace := createNamespace(acmNamespaceName)
-			Expect(k8sClient.Create(ctx, acmNamespace)).Should(Succeed())
-
-			veleroBackups = []veleroapi.Backup{}
-			rhacmRestore = *createACMRestore(restoreName+"-new", acmNamespaceName).
-				cleanupBeforeRestore(v1beta1.CleanupTypeNone).
-				veleroManagedClustersBackupName(latestBackup).
-				veleroCredentialsBackupName(skipRestore).
-				veleroResourcesBackupName(skipRestore).object
-
-			oneHourAgo := metav1.NewTime(time.Now().Add(-1 * time.Hour))
-			veleroBackups = []veleroapi.Backup{
-				*createBackup("acm-managed-clusters-schedule-recent-backup", veleroNamespace.Name).
-					phase(veleroapi.BackupPhaseCompleted).
-					errors(0).startTimestamp(oneHourAgo).
-					object,
-			}
-		})
-		It("should fail when restore is created in wrong namespace", func() {
-			waitForVeleroRestoreCount(ctx, k8sClient, veleroNamespace.Name, 0, timeout, interval)
-			waitForRestorePhase(ctx, k8sClient, restoreName+"-new", acmNamespaceName, v1beta1.RestorePhaseError, timeout, interval)
-
-			createdRestore := getRestoreWithRetry(ctx, k8sClient, restoreName+"-new", acmNamespaceName, timeout, interval)
-			Expect(
-				createdRestore.Status.LastMessage,
-			).Should(BeIdenticalTo("Backup storage location not available in namespace acm-ns-1. " +
-				"Check velero.io.BackupStorageLocation and validate storage credentials."))
-		},
-		)
-	})
-
-	Context("when backup storage location is invalid", func() {
-		BeforeEach(func() {
-			veleroNamespace = createNamespace("velero-restore-ns-6")
-			backupStorageLocation = createStorageLocation("default-6", veleroNamespace.Name).
-				phase(veleroapi.BackupStorageLocationPhaseUnavailable).object
-
-			veleroBackups = []veleroapi.Backup{}
-			rhacmRestore = *createACMRestore(restoreName+"-new", veleroNamespace.Name).
-				cleanupBeforeRestore(v1beta1.CleanupTypeNone).
-				veleroManagedClustersBackupName(latestBackup).
-				veleroCredentialsBackupName(skipRestore).
-				veleroResourcesBackupName(skipRestore).object
-
-			oneHourAgo := metav1.NewTime(time.Now().Add(-1 * time.Hour))
-			veleroBackups = []veleroapi.Backup{
-				*createBackup("acm-managed-clusters-schedule-recent-backup", veleroNamespace.Name).
-					phase(veleroapi.BackupPhaseCompleted).
-					errors(0).startTimestamp(oneHourAgo).
-					object,
-			}
-		})
-		It("should fail when backup storage location is invalid", func() {
-			waitForVeleroRestoreCount(ctx, k8sClient, veleroNamespace.Name, 0, timeout, interval)
-			waitForRestorePhase(ctx, k8sClient, restoreName+"-new", veleroNamespace.Name, v1beta1.RestorePhaseError, timeout, interval)
-
-			createdRestore := getRestoreWithRetry(ctx, k8sClient, restoreName+"-new", veleroNamespace.Name, timeout, interval)
-			Expect(
-				createdRestore.Status.LastMessage,
-			).Should(BeIdenticalTo("Backup storage location not available in namespace velero-restore-ns-6. " +
-				"Check velero.io.BackupStorageLocation and validate storage credentials."))
-		},
-		)
-	})
-
-	// Test Context: Status Lifecycle and Integration Testing
-	//
-	// This context comprehensively tests the ACM restore status lifecycle and its
-	// integration with backup schedules. It validates status transitions, finalizer
-	// handling, schedule interactions, and the complete state machine behavior
-	// of the restore controller.
-	Context("when tracking restore status lifecycle", func() {
-		BeforeEach(func() {
-			restoreName = "my-restore"
-			veleroNamespace = createNamespace("velero-restore-ns-7")
-			backupStorageLocation = createStorageLocation("default-5", veleroNamespace.Name).
-				phase(veleroapi.BackupStorageLocationPhaseAvailable).
-				setOwner().object
-
-			rhacmRestore = *createACMRestore(restoreName, veleroNamespace.Name).
-				cleanupBeforeRestore(v1beta1.CleanupTypeAll).
-				veleroManagedClustersBackupName(skipRestore).
-				veleroCredentialsBackupName(latestBackup).
-				veleroResourcesBackupName(latestBackup).object
-
-			oneHourAgo := metav1.NewTime(time.Now().Add(-1 * time.Hour))
-			veleroBackups = []veleroapi.Backup{
-				*createBackup("acm-resources-schedule-good-very-recent-backup", veleroNamespace.Name).
-					includedResources(includedResources).
-					phase(veleroapi.BackupPhaseCompleted).
-					errors(0).startTimestamp(oneHourAgo).
-					object,
-				*createBackup("acm-credentials-schedule-good-very-recent-backup", veleroNamespace.Name).
-					includedResources(backupCredsResources).
-					phase(veleroapi.BackupPhaseCompleted).
-					errors(0).startTimestamp(oneHourAgo).
-					object,
-			}
-		})
-
-		It("should track complete status lifecycle and schedule integration", func() {
-			// should be able to  create a paused schedule, even if a restore is running
-			rhacmBackupPaused := *createBackupSchedule("backup-sch-paused", veleroNamespace.Name).
-				schedule("0 */1 * * *").
-				paused(true).
-				veleroTTL(metav1.Duration{Duration: time.Hour * 72}).object
-
-			// check if finalizer is set on acm restore resource
-			By("created acm restore should have the finalizer set")
-			Eventually(func() bool {
-				err := k8sClient.Get(ctx, createLookupKey(restoreName, veleroNamespace.Name), &rhacmRestore)
-				if err != nil {
-					return false
-				}
-				return controllerutil.ContainsFinalizer(&rhacmRestore, acmRestoreFinalizer)
-			}, timeout, interval).Should(BeTrue())
-
-			Expect(k8sClient.Create(ctx, &rhacmBackupPaused)).Should(Succeed())
-			Eventually(func() v1beta1.SchedulePhase {
-				err := k8sClient.Get(ctx,
-					types.NamespacedName{
-						Name:      rhacmBackupPaused.Name,
-						Namespace: veleroNamespace.Name,
-					}, &rhacmBackupPaused)
-				if err != nil {
-					return ""
-				}
-				return rhacmBackupPaused.Status.Phase
-			}, timeout, interval).Should(BeEquivalentTo(v1beta1.SchedulePhasePaused))
-
-			// should be able to create a restore resource when there is a paused backup schedule running
-			createdRestore := v1beta1.Restore{}
-			By("created restore should contain velero restores in status")
-			Eventually(func() string {
-				err := k8sClient.Get(ctx,
-					types.NamespacedName{
-						Name:      restoreName,
-						Namespace: veleroNamespace.Name,
-					}, &createdRestore)
-				if err != nil {
-					return ""
-				}
-				return createdRestore.Status.VeleroResourcesRestoreName
-			}, timeout, interval).ShouldNot(BeEmpty())
-
-			veleroRestores := veleroapi.RestoreList{
-				TypeMeta: metav1.TypeMeta{
-					APIVersion: "velero/v1",
-					Kind:       "RestoreList",
-				},
-				Items: []veleroapi.Restore{
-					*createRestore("acm-credentials-restore", veleroNamespace.Name).
-						backupName("acm-credentials-backup").
-						phase("").
-						object,
-					*createRestore("acm-resources-restore", veleroNamespace.Name).
-						backupName("acm-resources-backup").
-						phase(veleroapi.RestorePhaseCompleted).
-						object,
-				},
-			}
-
-			setRestorePhase(&veleroRestores, &createdRestore)
-			Expect(
-				createdRestore.Status.Phase,
-			).Should(BeEquivalentTo(v1beta1.RestorePhaseUnknown))
-
-			veleroRestores.Items[0].Status.Phase = veleroapi.RestorePhaseNew
-			setRestorePhase(&veleroRestores, &createdRestore)
-			Expect(
-				createdRestore.Status.Phase,
-			).Should(BeEquivalentTo(v1beta1.RestorePhaseStarted))
-
-			veleroRestores.Items[0].Status.Phase = veleroapi.RestorePhaseFailedValidation
-			setRestorePhase(&veleroRestores, &createdRestore)
-			Expect(
-				createdRestore.Status.Phase,
-			).Should(BeEquivalentTo(v1beta1.RestorePhaseError))
-
-			veleroRestores.Items[0].Status.Phase = veleroapi.RestorePhaseFailed
-			setRestorePhase(&veleroRestores, &createdRestore)
-			Expect(
-				createdRestore.Status.Phase,
-			).Should(BeEquivalentTo(v1beta1.RestorePhaseError))
-
-			veleroRestores.Items[0].Status.Phase = veleroapi.RestorePhaseInProgress
-			setRestorePhase(&veleroRestores, &createdRestore)
-			Expect(
-				createdRestore.Status.Phase,
-			).Should(BeEquivalentTo(v1beta1.RestorePhaseRunning))
-
-			veleroRestores.Items[0].Status.Phase = veleroapi.RestorePhasePartiallyFailed
-			setRestorePhase(&veleroRestores, &createdRestore)
-			Expect(
-				createdRestore.Status.Phase,
-			).Should(BeEquivalentTo(v1beta1.RestorePhaseFinishedWithErrors))
-
-			veleroRestores.Items[0].Status.Phase = veleroapi.RestorePhaseCompleted
-			setRestorePhase(&veleroRestores, &createdRestore)
-			Expect(
-				createdRestore.Status.Phase,
-			).Should(BeEquivalentTo(v1beta1.RestorePhaseFinished))
-
-			// delete the paused schedule
-			Expect(k8sClient.Delete(ctx, &rhacmBackupPaused)).Should(Succeed())
-
-			// should be able to  create paused schedule, even if restore is running
-			rhacmBackupScheduleNoErrPaused := *createBackupSchedule("backup-sch-no-error-restore-paused", veleroNamespace.Name).
-				schedule("0 */1 * * *").
-				paused(true).
-				veleroTTL(metav1.Duration{Duration: time.Hour * 72}).object
-
-			Expect(k8sClient.Create(ctx, &rhacmBackupScheduleNoErrPaused)).Should(Succeed())
-			Eventually(func() v1beta1.SchedulePhase {
-				err := k8sClient.Get(ctx,
-					types.NamespacedName{
-						Name:      rhacmBackupScheduleNoErrPaused.Name,
-						Namespace: veleroNamespace.Name,
-					}, &rhacmBackupScheduleNoErrPaused)
-				if err != nil {
-					return ""
-				}
-				return rhacmBackupScheduleNoErrPaused.Status.Phase
-			}, timeout, interval).Should(BeEquivalentTo(v1beta1.SchedulePhasePaused))
-			// delete this paused schedule
-			Expect(k8sClient.Delete(ctx, &rhacmBackupScheduleNoErrPaused)).Should(Succeed())
-
-			// failing to create schedule, restore is running
-			rhacmBackupScheduleErr := *createBackupSchedule("backup-sch-to-error-restore", veleroNamespace.Name).
-				schedule("backup-schedule").
-				veleroTTL(metav1.Duration{Duration: time.Hour * 72}).object
-
-			Expect(k8sClient.Create(ctx, &rhacmBackupScheduleErr)).Should(Succeed())
-			Eventually(func() v1beta1.SchedulePhase {
-				err := k8sClient.Get(ctx,
-					types.NamespacedName{
-						Name:      rhacmBackupScheduleErr.Name,
-						Namespace: veleroNamespace.Name,
-					}, &rhacmBackupScheduleErr)
-				if err != nil {
-					return ""
-				}
-				return rhacmBackupScheduleErr.Status.Phase
-			}, timeout, interval).Should(BeEquivalentTo(v1beta1.SchedulePhaseFailedValidation))
-
-			createdRestore.Spec.SyncRestoreWithNewBackups = true
-			createdRestore.Spec.RestoreSyncInterval = metav1.Duration{Duration: time.Minute * 20}
-			setRestorePhase(&veleroRestores, &createdRestore)
-			Expect(
-				createdRestore.Status.Phase,
-			).Should(BeEquivalentTo(v1beta1.RestorePhaseEnabled))
-
-			// cannot create another restore, one is enabled
-			restoreFailing := *createACMRestore(restoreName+"-fail", veleroNamespace.Name).
-				cleanupBeforeRestore(v1beta1.CleanupTypeRestored).syncRestoreWithNewBackups(true).
-				restoreSyncInterval(metav1.Duration{Duration: time.Minute * 20}).
-				veleroManagedClustersBackupName(skipRestore).
-				veleroCredentialsBackupName(veleroCredentialsBackupName).
-				veleroResourcesBackupName(veleroResourcesBackupName).object
-
-			Expect(k8sClient.Create(ctx, &restoreFailing)).Should(Succeed())
-			// one is already enabled
-			Eventually(func() v1beta1.RestorePhase {
-				err := k8sClient.Get(ctx,
-					types.NamespacedName{
-						Name:      restoreFailing.Name,
-						Namespace: veleroNamespace.Name,
-					}, &restoreFailing)
-				if err != nil {
-					return ""
-				}
-				return restoreFailing.Status.Phase
-			}, timeout, interval).Should(BeEquivalentTo(v1beta1.RestorePhaseFinishedWithErrors))
-			Expect(k8sClient.Delete(ctx, &restoreFailing)).Should(Succeed())
-			Expect(k8sClient.Delete(ctx, &rhacmBackupScheduleErr)).Should(Succeed())
-		})
-	})
-
-	// Test Context: Storage Location Validation
-	//
-	// This context tests scenarios where the backup storage location is not properly
-	// configured or available. It validates that the controller correctly handles
-	// missing or invalid storage locations and provides appropriate error messages.
-	Context("when backup storage location is unavailable", func() {
-		BeforeEach(func() {
-			restoreName = "my-restore"
-			veleroNamespace = createNamespace("velero-restore-ns-8")
-			backupStorageLocation = nil
-
-			rhacmRestore = *createACMRestore(restoreName, veleroNamespace.Name).
-				cleanupBeforeRestore(v1beta1.CleanupTypeNone).
-				veleroManagedClustersBackupName(skipRestore).
-				veleroCredentialsBackupName(skipRestore).
-				veleroResourcesBackupName(skipRestore).object
-
-			oneHourAgo := metav1.NewTime(time.Now().Add(-1 * time.Hour))
-			veleroBackups = []veleroapi.Backup{
-				*createBackup("acm-managed-clusters-schedule-good-very-recent-backup", veleroNamespace.Name).
-					includedResources(backupManagedClusterResources).
-					phase(veleroapi.BackupPhaseCompleted).
-					errors(0).startTimestamp(oneHourAgo).
-					object,
-			}
-		})
-
-		It("should fail when backup storage location is unavailable", func() {
-			createdRestore := v1beta1.Restore{}
-			By("created restore should not contain velero restores in status")
-			Eventually(func() string {
-				err := k8sClient.Get(ctx,
-					types.NamespacedName{
-						Name:      restoreName,
-						Namespace: veleroNamespace.Name,
-					}, &createdRestore)
-				if err != nil {
-					return err.Error()
-				}
-				return createdRestore.Status.VeleroManagedClustersRestoreName
-			}, timeout, interval).Should(BeEmpty())
-
-			By("Checking ACM restore phase when velero restore is in error", func() {
-				Eventually(func() v1beta1.RestorePhase {
-					err := k8sClient.Get(ctx,
+				By("created restore should now contain new velero backup names in status")
+				waitForRestoreStatusFieldValue(ctx, k8sClient, restoreName, veleroNamespace.Name,
+					func(r *v1beta1.Restore) string { return r.Status.VeleroCredentialsRestoreName },
+					"rhacm-restore-1-acm-credentials-schedule-good-recent-backup", timeout, interval)
+				waitForRestoreStatusFieldValue(ctx, k8sClient, restoreName, veleroNamespace.Name,
+					func(r *v1beta1.Restore) string { return r.Status.VeleroResourcesRestoreName },
+					"rhacm-restore-1-acm-resources-schedule-good-recent-backup", timeout, interval)
+				// check if new velero restores are created
+				Expect(
+					k8sClient.Get(
+						ctx,
 						types.NamespacedName{
-							Name:      restoreName,
 							Namespace: veleroNamespace.Name,
-						}, &createdRestore)
+							Name:      restoreName + "-acm-credentials-schedule-good-recent-backup",
+						},
+						&veleroRestore,
+					),
+				).ShouldNot(HaveOccurred())
+				Expect(
+					k8sClient.Get(
+						ctx,
+						types.NamespacedName{
+							Namespace: veleroNamespace.Name,
+							Name:      restoreName + "-acm-resources-schedule-good-recent-backup",
+						},
+						&veleroRestore,
+					),
+				).ShouldNot(HaveOccurred())
+
+				// create a restore resource to test the collision path when trying to create the same restore
+				restoreResourceCollision := *createRestore(
+					"rhacm-restore-1-acm-resources-generic-schedule-good-old-backup", veleroNamespace.Name).
+					backupName("acm-resources-schedule-good-old-backup").
+					phase("Completed").
+					object
+
+				Expect(k8sClient.Create(ctx, &restoreResourceCollision)).Should(Succeed())
+
+				Expect(createdRestore.Spec.VeleroManagedClustersBackupName).Should(Equal(&skipRestore))
+
+				Eventually(func() string {
+					err := k8sClient.Get(ctx, restoreLookupKey, &createdRestore)
 					if err != nil {
 						return ""
 					}
+					// update createdRestore status to Enabled
+					createdRestore.Status.Phase = v1beta1.RestorePhaseEnabled
+					err = k8sClient.Status().Update(ctx, &createdRestore)
+					if err != nil {
+						return ""
+					}
+					return string(createdRestore.Status.Phase)
+				}, timeout, interval).Should(BeIdenticalTo(v1beta1.RestorePhaseEnabled))
+
+				// now trigger a resource update by setting VeleroManagedClustersBackupName to latest
+				// it should only restore the managed clusters and generic resources since
+				// there is no new backup for resources and credentials
+				if err := k8sClient.Get(ctx, restoreLookupKey, &createdRestore); err == nil {
+					createdRestore.Spec.VeleroManagedClustersBackupName = &latestBackup
+					Expect(k8sClient.Update(ctx, &createdRestore)).Should(Succeed())
+				}
+			})
+		})
+
+		// Test Context: Selective Backup Skipping
+		//
+		// This context tests the ability to selectively skip certain types of backups
+		// during restore operations. This is useful when you only want to restore
+		// specific components (e.g., only credentials, only resources) rather than
+		// performing a complete restore.
+		Context("when creating restore with backup names set to skip", func() {
+			BeforeEach(func() {
+				veleroNamespace = createNamespace("velero-restore-ns-3")
+				backupStorageLocation = createStorageLocation("default", veleroNamespace.Name).
+					setOwner().
+					phase(veleroapi.BackupStorageLocationPhaseAvailable).object
+				rhacmRestore = *createACMRestore(restoreName, veleroNamespace.Name).
+					cleanupBeforeRestore(v1beta1.CleanupTypeNone).
+					veleroManagedClustersBackupName(skipRestore).
+					veleroCredentialsBackupName(skipRestore).
+					veleroResourcesBackupName(skipRestore).object
+
+				veleroBackups = []veleroapi.Backup{}
+			})
+			It("should skip backup restoration when configured with skip option", func() {
+				By("created restore should contain velero restore in status")
+				waitForRestoreStatusFieldEmpty(ctx, k8sClient, restoreName, veleroNamespace.Name,
+					func(r *v1beta1.Restore) string { return r.Status.VeleroManagedClustersRestoreName },
+					timeout, interval)
+				waitForRestoreStatusFieldEmpty(ctx, k8sClient, restoreName, veleroNamespace.Name,
+					func(r *v1beta1.Restore) string { return r.Status.VeleroCredentialsRestoreName },
+					timeout, interval)
+				waitForRestoreStatusFieldEmpty(ctx, k8sClient, restoreName, veleroNamespace.Name,
+					func(r *v1beta1.Restore) string { return r.Status.VeleroResourcesRestoreName },
+					timeout, interval)
+
+				veleroRestores := veleroapi.RestoreList{}
+				createdRestore := v1beta1.Restore{}
+				Eventually(func() bool {
+					if err := k8sClient.List(ctx, &veleroRestores, client.InNamespace(veleroNamespace.Name)); err != nil {
+						return false
+					}
+					return len(veleroRestores.Items) == 0
+				}, timeout, interval).Should(BeTrue())
+				Eventually(func() v1beta1.RestorePhase {
+					restoreLookupKey := types.NamespacedName{
+						Name:      restoreName,
+						Namespace: veleroNamespace.Name,
+					}
+					err := k8sClient.Get(ctx, restoreLookupKey, &createdRestore)
+					Expect(err).NotTo(HaveOccurred())
 					return createdRestore.Status.Phase
-				}, timeout, interval).Should(BeEquivalentTo(v1beta1.RestorePhaseError))
+				}, timeout, interval).Should(BeEquivalentTo(v1beta1.RestorePhaseFinished))
+
+				// createdRestore above has RestorePhaseFinished status
+				// the following restore should not be ignored
+				rhacmRestoreNotIgnoredButError := *createACMRestore(restoreName+"not-ignored-but-invalid", veleroNamespace.Name).
+					cleanupBeforeRestore("someInvalidValue").
+					veleroManagedClustersBackupName(skipRestore).
+					veleroCredentialsBackupName(skipRestore).
+					veleroResourcesBackupName(latestBackup).object
+
+				Expect(k8sClient.Create(ctx, &rhacmRestoreNotIgnoredButError)).Should(Succeed())
+				notIgnoredRestoreErr := v1beta1.Restore{}
+				Eventually(func() v1beta1.RestorePhase {
+					restoreLookupKey := types.NamespacedName{
+						Name:      restoreName + "not-ignored-but-invalid",
+						Namespace: veleroNamespace.Name,
+					}
+					err := k8sClient.Get(ctx, restoreLookupKey, &notIgnoredRestoreErr)
+					Expect(err).NotTo(HaveOccurred())
+					return notIgnoredRestoreErr.Status.Phase
+				}, timeout, interval).Should(BeEquivalentTo(v1beta1.RestorePhaseFinishedWithErrors))
+
+				// createdRestore above has RestorePhaseFinished status
+				// the following restore should not be ignored
+				rhacmRestoreNotIgnored := *createACMRestore(restoreName+"not-ignored", veleroNamespace.Name).
+					cleanupBeforeRestore(v1beta1.CleanupTypeNone).
+					veleroManagedClustersBackupName(skipRestore).
+					veleroCredentialsBackupName(skipRestore).
+					veleroResourcesBackupName(skipRestore).object
+
+				Expect(k8sClient.Create(ctx, &rhacmRestoreNotIgnored)).Should(Succeed())
+				notIgnoredRestore := v1beta1.Restore{}
+				Eventually(func() v1beta1.RestorePhase {
+					restoreLookupKey := types.NamespacedName{
+						Name:      restoreName + "not-ignored",
+						Namespace: veleroNamespace.Name,
+					}
+					err := k8sClient.Get(ctx, restoreLookupKey, &notIgnoredRestore)
+					Expect(err).NotTo(HaveOccurred())
+					return notIgnoredRestore.Status.Phase
+				}, timeout, interval).Should(BeEquivalentTo(v1beta1.RestorePhaseFinished))
+			})
+		})
+
+		// Test Context: Status Lifecycle and Integration Testing
+		//
+		// This context comprehensively tests the ACM restore status lifecycle and its
+		// integration with backup schedules. It validates status transitions, finalizer
+		// handling, schedule interactions, and the complete state machine behavior
+		// of the restore controller.
+		Context("when tracking restore status lifecycle", func() {
+			BeforeEach(func() {
+				restoreName = "my-restore"
+				veleroNamespace = createNamespace("velero-restore-ns-7")
+				backupStorageLocation = createStorageLocation("default-5", veleroNamespace.Name).
+					phase(veleroapi.BackupStorageLocationPhaseAvailable).
+					setOwner().object
+
+				rhacmRestore = *createACMRestore(restoreName, veleroNamespace.Name).
+					cleanupBeforeRestore(v1beta1.CleanupTypeAll).
+					veleroManagedClustersBackupName(skipRestore).
+					veleroCredentialsBackupName(latestBackup).
+					veleroResourcesBackupName(latestBackup).object
+
+				oneHourAgo := metav1.NewTime(time.Now().Add(-1 * time.Hour))
+				veleroBackups = []veleroapi.Backup{
+					*createBackup("acm-resources-schedule-good-very-recent-backup", veleroNamespace.Name).
+						includedResources(includedResources).
+						phase(veleroapi.BackupPhaseCompleted).
+						errors(0).startTimestamp(oneHourAgo).
+						object,
+					*createBackup("acm-credentials-schedule-good-very-recent-backup", veleroNamespace.Name).
+						includedResources(backupCredsResources).
+						phase(veleroapi.BackupPhaseCompleted).
+						errors(0).startTimestamp(oneHourAgo).
+						object,
+				}
 			})
 
-			By("Checking ACM restore message", func() {
+			It("should track complete status lifecycle and schedule integration", func() {
+				// should be able to  create a paused schedule, even if a restore is running
+				rhacmBackupPaused := *createBackupSchedule("backup-sch-paused", veleroNamespace.Name).
+					schedule("0 */1 * * *").
+					paused(true).
+					veleroTTL(metav1.Duration{Duration: time.Hour * 72}).object
+
+				// check if finalizer is set on acm restore resource
+				By("created acm restore should have the finalizer set")
+				Eventually(func() bool {
+					err := k8sClient.Get(ctx, createLookupKey(restoreName, veleroNamespace.Name), &rhacmRestore)
+					if err != nil {
+						return false
+					}
+					return controllerutil.ContainsFinalizer(&rhacmRestore, acmRestoreFinalizer)
+				}, timeout, interval).Should(BeTrue())
+
+				Expect(k8sClient.Create(ctx, &rhacmBackupPaused)).Should(Succeed())
+				Eventually(func() v1beta1.SchedulePhase {
+					err := k8sClient.Get(ctx,
+						types.NamespacedName{
+							Name:      rhacmBackupPaused.Name,
+							Namespace: veleroNamespace.Name,
+						}, &rhacmBackupPaused)
+					if err != nil {
+						return ""
+					}
+					return rhacmBackupPaused.Status.Phase
+				}, timeout, interval).Should(BeEquivalentTo(v1beta1.SchedulePhasePaused))
+
+				// should be able to create a restore resource when there is a paused backup schedule running
+				createdRestore := v1beta1.Restore{}
+				By("created restore should contain velero restores in status")
 				Eventually(func() string {
 					err := k8sClient.Get(ctx,
 						types.NamespacedName{
@@ -1240,12 +930,366 @@ var _ = Describe("Basic Restore controller", func() {
 					if err != nil {
 						return ""
 					}
-					return createdRestore.Status.LastMessage
-				}, timeout, interval).Should(BeIdenticalTo("velero.io.BackupStorageLocation resources not found. " +
-					"Verify you have created a konveyor.openshift.io.Velero or oadp.openshift.io.DataProtectionApplications " +
-					"resource."))
+					return createdRestore.Status.VeleroResourcesRestoreName
+				}, timeout, interval).ShouldNot(BeEmpty())
+
+				veleroRestores := veleroapi.RestoreList{
+					TypeMeta: metav1.TypeMeta{
+						APIVersion: "velero/v1",
+						Kind:       "RestoreList",
+					},
+					Items: []veleroapi.Restore{
+						*createRestore("acm-credentials-restore", veleroNamespace.Name).
+							backupName("acm-credentials-backup").
+							phase("").
+							object,
+						*createRestore("acm-resources-restore", veleroNamespace.Name).
+							backupName("acm-resources-backup").
+							phase(veleroapi.RestorePhaseCompleted).
+							object,
+					},
+				}
+
+				setRestorePhase(&veleroRestores, &createdRestore)
+				Expect(
+					createdRestore.Status.Phase,
+				).Should(BeEquivalentTo(v1beta1.RestorePhaseUnknown))
+
+				veleroRestores.Items[0].Status.Phase = veleroapi.RestorePhaseNew
+				setRestorePhase(&veleroRestores, &createdRestore)
+				Expect(
+					createdRestore.Status.Phase,
+				).Should(BeEquivalentTo(v1beta1.RestorePhaseStarted))
+
+				veleroRestores.Items[0].Status.Phase = veleroapi.RestorePhaseFailedValidation
+				setRestorePhase(&veleroRestores, &createdRestore)
+				Expect(
+					createdRestore.Status.Phase,
+				).Should(BeEquivalentTo(v1beta1.RestorePhaseError))
+
+				veleroRestores.Items[0].Status.Phase = veleroapi.RestorePhaseFailed
+				setRestorePhase(&veleroRestores, &createdRestore)
+				Expect(
+					createdRestore.Status.Phase,
+				).Should(BeEquivalentTo(v1beta1.RestorePhaseError))
+
+				veleroRestores.Items[0].Status.Phase = veleroapi.RestorePhaseInProgress
+				setRestorePhase(&veleroRestores, &createdRestore)
+				Expect(
+					createdRestore.Status.Phase,
+				).Should(BeEquivalentTo(v1beta1.RestorePhaseRunning))
+
+				veleroRestores.Items[0].Status.Phase = veleroapi.RestorePhasePartiallyFailed
+				setRestorePhase(&veleroRestores, &createdRestore)
+				Expect(
+					createdRestore.Status.Phase,
+				).Should(BeEquivalentTo(v1beta1.RestorePhaseFinishedWithErrors))
+
+				veleroRestores.Items[0].Status.Phase = veleroapi.RestorePhaseCompleted
+				setRestorePhase(&veleroRestores, &createdRestore)
+				Expect(
+					createdRestore.Status.Phase,
+				).Should(BeEquivalentTo(v1beta1.RestorePhaseFinished))
+
+				// delete the paused schedule
+				Expect(k8sClient.Delete(ctx, &rhacmBackupPaused)).Should(Succeed())
+
+				// should be able to  create paused schedule, even if restore is running
+				rhacmBackupScheduleNoErrPaused := *createBackupSchedule("backup-sch-no-error-restore-paused", veleroNamespace.Name).
+					schedule("0 */1 * * *").
+					paused(true).
+					veleroTTL(metav1.Duration{Duration: time.Hour * 72}).object
+
+				Expect(k8sClient.Create(ctx, &rhacmBackupScheduleNoErrPaused)).Should(Succeed())
+				Eventually(func() v1beta1.SchedulePhase {
+					err := k8sClient.Get(ctx,
+						types.NamespacedName{
+							Name:      rhacmBackupScheduleNoErrPaused.Name,
+							Namespace: veleroNamespace.Name,
+						}, &rhacmBackupScheduleNoErrPaused)
+					if err != nil {
+						return ""
+					}
+					return rhacmBackupScheduleNoErrPaused.Status.Phase
+				}, timeout, interval).Should(BeEquivalentTo(v1beta1.SchedulePhasePaused))
+				// delete this paused schedule
+				Expect(k8sClient.Delete(ctx, &rhacmBackupScheduleNoErrPaused)).Should(Succeed())
+
+				// failing to create schedule, restore is running
+				rhacmBackupScheduleErr := *createBackupSchedule("backup-sch-to-error-restore", veleroNamespace.Name).
+					schedule("backup-schedule").
+					veleroTTL(metav1.Duration{Duration: time.Hour * 72}).object
+
+				Expect(k8sClient.Create(ctx, &rhacmBackupScheduleErr)).Should(Succeed())
+				Eventually(func() v1beta1.SchedulePhase {
+					err := k8sClient.Get(ctx,
+						types.NamespacedName{
+							Name:      rhacmBackupScheduleErr.Name,
+							Namespace: veleroNamespace.Name,
+						}, &rhacmBackupScheduleErr)
+					if err != nil {
+						return ""
+					}
+					return rhacmBackupScheduleErr.Status.Phase
+				}, timeout, interval).Should(BeEquivalentTo(v1beta1.SchedulePhaseFailedValidation))
+
+				createdRestore.Spec.SyncRestoreWithNewBackups = true
+				createdRestore.Spec.RestoreSyncInterval = metav1.Duration{Duration: time.Minute * 20}
+				setRestorePhase(&veleroRestores, &createdRestore)
+				Expect(
+					createdRestore.Status.Phase,
+				).Should(BeEquivalentTo(v1beta1.RestorePhaseEnabled))
+
+				// cannot create another restore, one is enabled
+				restoreFailing := *createACMRestore(restoreName+"-fail", veleroNamespace.Name).
+					cleanupBeforeRestore(v1beta1.CleanupTypeRestored).syncRestoreWithNewBackups(true).
+					restoreSyncInterval(metav1.Duration{Duration: time.Minute * 20}).
+					veleroManagedClustersBackupName(skipRestore).
+					veleroCredentialsBackupName(veleroCredentialsBackupName).
+					veleroResourcesBackupName(veleroResourcesBackupName).object
+
+				Expect(k8sClient.Create(ctx, &restoreFailing)).Should(Succeed())
+				// one is already enabled
+				Eventually(func() v1beta1.RestorePhase {
+					err := k8sClient.Get(ctx,
+						types.NamespacedName{
+							Name:      restoreFailing.Name,
+							Namespace: veleroNamespace.Name,
+						}, &restoreFailing)
+					if err != nil {
+						return ""
+					}
+					return restoreFailing.Status.Phase
+				}, timeout, interval).Should(BeEquivalentTo(v1beta1.RestorePhaseFinishedWithErrors))
+				Expect(k8sClient.Delete(ctx, &restoreFailing)).Should(Succeed())
+				Expect(k8sClient.Delete(ctx, &rhacmBackupScheduleErr)).Should(Succeed())
 			})
-		},
-		)
-	})
+		})
+	}) // End of advanced restore features
+
+	// =============================================================================
+	// ERROR HANDLING AND VALIDATION TESTS
+	// =============================================================================
+	//
+	// This section tests error scenarios, validation logic, and edge cases to ensure
+	// the controller properly handles invalid configurations and provides meaningful
+	// error messages to users.
+
+	// Test Context Group: Error Handling and Validation
+	//
+	// This group of contexts tests various error scenarios and validation logic
+	// to ensure the controller properly handles invalid configurations and
+	// provides meaningful error messages to users.
+	Context("error handling and validation", func() {
+
+		// Test Context: Invalid Backup Names
+		//
+		// This context tests error handling scenarios where invalid backup names are
+		// provided. It validates that the controller properly detects and reports
+		// errors when referenced backups don't exist or are invalid.
+		Context("when creating restore with invalid backup name", func() {
+			BeforeEach(func() {
+				veleroNamespace = createNamespace("velero-restore-ns-4")
+
+				veleroBackups = []veleroapi.Backup{}
+				rhacmRestore = *createACMRestore(restoreName, veleroNamespace.Name).
+					cleanupBeforeRestore(v1beta1.CleanupTypeRestored).
+					veleroManagedClustersBackupName(latestBackup).
+					veleroCredentialsBackupName(invalidBackup).
+					veleroResourcesBackupName(latestBackup).object
+
+				backupStorageLocation = createStorageLocation("default", veleroNamespace.Name).
+					setOwner().
+					phase(veleroapi.BackupStorageLocationPhaseAvailable).object
+
+				oneHourAgo := metav1.NewTime(time.Now().Add(-1 * time.Hour))
+				veleroBackups = []veleroapi.Backup{
+					// acm-managed-clusters-schedule backups
+					*createBackup("acm-managed-clusters-schedule-gold-backup", veleroNamespace.Name).
+						phase(veleroapi.BackupPhaseCompleted).
+						errors(0).startTimestamp(oneHourAgo).
+						object,
+					*createBackup("acm-resources-schedule-gold-backup", veleroNamespace.Name).
+						phase(veleroapi.BackupPhaseCompleted).
+						errors(0).startTimestamp(oneHourAgo).
+						object,
+				}
+			})
+			It("should fail to create restore when backup names are invalid", func() {
+				waitForVeleroRestoreCount(ctx, k8sClient, veleroNamespace.Name, 0, timeout, interval)
+				waitForRestorePhase(ctx, k8sClient, restoreName, veleroNamespace.Name, v1beta1.RestorePhaseError, timeout, interval)
+
+				createdRestore := getRestoreWithRetry(ctx, k8sClient, restoreName, veleroNamespace.Name, timeout, interval)
+				Expect(
+					createdRestore.Status.LastMessage,
+				).Should(BeIdenticalTo("cannot find invalid-backup-name Velero Backup: " +
+					"Backup.velero.io \"invalid-backup-name\" not found"))
+
+				// createdRestore above is has RestorePhaseError status
+				// the following restore should be ignored
+				rhacmRestoreIgnored := *createACMRestore(restoreName+"ignored", veleroNamespace.Name).
+					cleanupBeforeRestore(v1beta1.CleanupTypeNone).
+					veleroManagedClustersBackupName(skipRestore).
+					veleroCredentialsBackupName(skipRestore).
+					veleroResourcesBackupName(skipRestore).object
+
+				Expect(k8sClient.Create(ctx, &rhacmRestoreIgnored)).Should(Succeed())
+				waitForRestorePhase(ctx, k8sClient, restoreName+"ignored", veleroNamespace.Name, v1beta1.RestorePhaseFinishedWithErrors, timeout, interval)
+			})
+		})
+
+		// Test Context: Namespace Validation
+		//
+		// This context tests scenarios where restores are created in incorrect
+		// namespaces that don't have proper Velero infrastructure configured.
+		Context("when creating restore in wrong namespace", func() {
+			BeforeEach(func() {
+				veleroNamespace = createNamespace("velero-restore-ns-5")
+				backupStorageLocation = createStorageLocation("default-5", veleroNamespace.Name).
+					setOwner().
+					phase(veleroapi.BackupStorageLocationPhaseAvailable).object
+
+				acmNamespaceName = "acm-ns-1"
+				acmNamespace := createNamespace(acmNamespaceName)
+				Expect(k8sClient.Create(ctx, acmNamespace)).Should(Succeed())
+
+				veleroBackups = []veleroapi.Backup{}
+				rhacmRestore = *createACMRestore(restoreName+"-new", acmNamespaceName).
+					cleanupBeforeRestore(v1beta1.CleanupTypeNone).
+					veleroManagedClustersBackupName(latestBackup).
+					veleroCredentialsBackupName(skipRestore).
+					veleroResourcesBackupName(skipRestore).object
+
+				oneHourAgo := metav1.NewTime(time.Now().Add(-1 * time.Hour))
+				veleroBackups = []veleroapi.Backup{
+					*createBackup("acm-managed-clusters-schedule-recent-backup", veleroNamespace.Name).
+						phase(veleroapi.BackupPhaseCompleted).
+						errors(0).startTimestamp(oneHourAgo).
+						object,
+				}
+			})
+			It("should fail when restore is created in wrong namespace", func() {
+				waitForVeleroRestoreCount(ctx, k8sClient, veleroNamespace.Name, 0, timeout, interval)
+				waitForRestorePhase(ctx, k8sClient, restoreName+"-new", acmNamespaceName, v1beta1.RestorePhaseError, timeout, interval)
+
+				createdRestore := getRestoreWithRetry(ctx, k8sClient, restoreName+"-new", acmNamespaceName, timeout, interval)
+				Expect(
+					createdRestore.Status.LastMessage,
+				).Should(BeIdenticalTo("Backup storage location not available in namespace acm-ns-1. " +
+					"Check velero.io.BackupStorageLocation and validate storage credentials."))
+			})
+		})
+
+		// Test Context: Storage Location Validation
+		//
+		// This context tests scenarios where backup storage locations have
+		// configuration issues or are in invalid states.
+		Context("when backup storage location is invalid", func() {
+			BeforeEach(func() {
+				veleroNamespace = createNamespace("velero-restore-ns-6")
+				backupStorageLocation = createStorageLocation("default-6", veleroNamespace.Name).
+					phase(veleroapi.BackupStorageLocationPhaseUnavailable).object
+
+				veleroBackups = []veleroapi.Backup{}
+				rhacmRestore = *createACMRestore(restoreName+"-new", veleroNamespace.Name).
+					cleanupBeforeRestore(v1beta1.CleanupTypeNone).
+					veleroManagedClustersBackupName(latestBackup).
+					veleroCredentialsBackupName(skipRestore).
+					veleroResourcesBackupName(skipRestore).object
+
+				oneHourAgo := metav1.NewTime(time.Now().Add(-1 * time.Hour))
+				veleroBackups = []veleroapi.Backup{
+					*createBackup("acm-managed-clusters-schedule-recent-backup", veleroNamespace.Name).
+						phase(veleroapi.BackupPhaseCompleted).
+						errors(0).startTimestamp(oneHourAgo).
+						object,
+				}
+			})
+			It("should fail when backup storage location is invalid", func() {
+				waitForVeleroRestoreCount(ctx, k8sClient, veleroNamespace.Name, 0, timeout, interval)
+				waitForRestorePhase(ctx, k8sClient, restoreName+"-new", veleroNamespace.Name, v1beta1.RestorePhaseError, timeout, interval)
+
+				createdRestore := getRestoreWithRetry(ctx, k8sClient, restoreName+"-new", veleroNamespace.Name, timeout, interval)
+				Expect(
+					createdRestore.Status.LastMessage,
+				).Should(BeIdenticalTo("Backup storage location not available in namespace velero-restore-ns-6. " +
+					"Check velero.io.BackupStorageLocation and validate storage credentials."))
+			})
+		})
+
+		// Test Context: Missing Storage Location
+		//
+		// This context tests scenarios where the backup storage location is not properly
+		// configured or available. It validates that the controller correctly handles
+		// missing or invalid storage locations and provides appropriate error messages.
+		Context("when backup storage location is unavailable", func() {
+			BeforeEach(func() {
+				restoreName = "my-restore"
+				veleroNamespace = createNamespace("velero-restore-ns-8")
+				backupStorageLocation = nil
+
+				rhacmRestore = *createACMRestore(restoreName, veleroNamespace.Name).
+					cleanupBeforeRestore(v1beta1.CleanupTypeNone).
+					veleroManagedClustersBackupName(skipRestore).
+					veleroCredentialsBackupName(skipRestore).
+					veleroResourcesBackupName(skipRestore).object
+
+				oneHourAgo := metav1.NewTime(time.Now().Add(-1 * time.Hour))
+				veleroBackups = []veleroapi.Backup{
+					*createBackup("acm-managed-clusters-schedule-good-very-recent-backup", veleroNamespace.Name).
+						includedResources(backupManagedClusterResources).
+						phase(veleroapi.BackupPhaseCompleted).
+						errors(0).startTimestamp(oneHourAgo).
+						object,
+				}
+			})
+
+			It("should fail when backup storage location is unavailable", func() {
+				createdRestore := v1beta1.Restore{}
+				By("created restore should not contain velero restores in status")
+				Eventually(func() string {
+					err := k8sClient.Get(ctx,
+						types.NamespacedName{
+							Name:      restoreName,
+							Namespace: veleroNamespace.Name,
+						}, &createdRestore)
+					if err != nil {
+						return err.Error()
+					}
+					return createdRestore.Status.VeleroManagedClustersRestoreName
+				}, timeout, interval).Should(BeEmpty())
+
+				By("Checking ACM restore phase when velero restore is in error", func() {
+					Eventually(func() v1beta1.RestorePhase {
+						err := k8sClient.Get(ctx,
+							types.NamespacedName{
+								Name:      restoreName,
+								Namespace: veleroNamespace.Name,
+							}, &createdRestore)
+						if err != nil {
+							return ""
+						}
+						return createdRestore.Status.Phase
+					}, timeout, interval).Should(BeEquivalentTo(v1beta1.RestorePhaseError))
+				})
+
+				By("Checking ACM restore message", func() {
+					Eventually(func() string {
+						err := k8sClient.Get(ctx,
+							types.NamespacedName{
+								Name:      restoreName,
+								Namespace: veleroNamespace.Name,
+							}, &createdRestore)
+						if err != nil {
+							return ""
+						}
+						return createdRestore.Status.LastMessage
+					}, timeout, interval).Should(BeIdenticalTo("velero.io.BackupStorageLocation resources not found. " +
+						"Verify you have created a konveyor.openshift.io.Velero or oadp.openshift.io.DataProtectionApplications " +
+						"resource."))
+				})
+			})
+		})
+
+	}) // End of error handling and validation group
 })
