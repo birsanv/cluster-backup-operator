@@ -719,10 +719,7 @@ var _ = Describe("BackupSchedule controller", func() {
 			}, timeout, interval).Should(BeIdenticalTo(metav1.Duration{Duration: extendedTTL}))
 
 			// count velero schedules, should be still len(veleroScheduleNames)
-			Eventually(func() bool {
-				err := k8sClient.List(ctx, &veleroSchedulesList, &client.ListOptions{})
-				return err == nil
-			}, timeout, interval).Should(BeTrue())
+			waitForListOperation(ctx, k8sClient, &veleroSchedulesList, timeout, interval, &client.ListOptions{})
 			Expect(len(veleroSchedulesList.Items)).To(BeNumerically("==", len(veleroScheduleNames)))
 			//
 
@@ -903,18 +900,12 @@ var _ = Describe("BackupSchedule controller", func() {
 			// acmSchedulesList represents the ACM - BackupSchedule.cluster.open-cluster-management.io - schedules
 			// created by the tests
 			acmSchedulesList := v1beta1.BackupScheduleList{}
-			Eventually(func() bool {
-				err := k8sClient.List(ctx, &acmSchedulesList, &client.ListOptions{})
-				return err == nil
-			}, timeout, interval).Should(BeTrue())
+			waitForListOperation(ctx, k8sClient, &acmSchedulesList, timeout, interval, &client.ListOptions{})
 			Expect(len(acmSchedulesList.Items)).To(BeNumerically(">=", expectedACMScheduleCount))
 
 			// count velero schedules
 			veleroScheduleList := veleroapi.ScheduleList{}
-			Eventually(func() bool {
-				err := k8sClient.List(ctx, &veleroScheduleList, &client.ListOptions{})
-				return err == nil
-			}, timeout, interval).Should(BeTrue())
+			waitForListOperation(ctx, k8sClient, &veleroScheduleList, timeout, interval, &client.ListOptions{})
 			Expect(len(veleroScheduleList.Items)).To(BeNumerically("==", len(veleroScheduleNames)))
 
 			for i := range veleroScheduleList.Items {
@@ -967,10 +958,7 @@ var _ = Describe("BackupSchedule controller", func() {
 			}
 
 			// acm schedules are 0 now
-			Eventually(func() bool {
-				err := k8sClient.List(ctx, &acmSchedulesList, &client.ListOptions{})
-				return err == nil
-			}, timeout, interval).Should(BeTrue())
+			waitForListOperation(ctx, k8sClient, &acmSchedulesList, timeout, interval, &client.ListOptions{})
 			Expect(len(acmSchedulesList.Items)).To(BeNumerically("==", 0))
 		})
 	})
