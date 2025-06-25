@@ -1022,3 +1022,70 @@ func waitForRestoreStatusFieldNonEmpty(
 		return fieldExtractor(&restore)
 	}, timeout, interval).ShouldNot(BeEmpty())
 }
+
+// waitForRestoreStatusFieldValue waits for a restore status field to equal a specific value
+func waitForRestoreStatusFieldValue(
+	ctx context.Context,
+	k8sClient client.Client,
+	restoreName, namespace string,
+	fieldExtractor func(*v1beta1.Restore) string,
+	expectedValue string,
+	timeout, interval time.Duration,
+) {
+	Eventually(func() string {
+		restore := v1beta1.Restore{}
+		restoreLookupKey := types.NamespacedName{
+			Name:      restoreName,
+			Namespace: namespace,
+		}
+		err := k8sClient.Get(ctx, restoreLookupKey, &restore)
+		if err != nil {
+			return ""
+		}
+		return fieldExtractor(&restore)
+	}, timeout, interval).Should(BeIdenticalTo(expectedValue))
+}
+
+// updateVeleroRestoreStatusToCompleted updates all velero restores in the list to completed status
+func updateVeleroRestoreStatusToCompleted(
+	ctx context.Context,
+	k8sClient client.Client,
+	restoreNames []string,
+	namespace string,
+	timeout, interval time.Duration,
+) {
+	Eventually(func() error {
+		for _, restoreName := range restoreNames {
+			veleroRestore := &veleroapi.Restore{}
+			err := k8sClient.Get(ctx, createLookupKey(restoreName, namespace), veleroRestore)
+			if err != nil {
+				return err
+			}
+			if veleroRestore.Status.Phase != veleroapi.RestorePhaseCompleted {
+				veleroRestore.Status.Phase = veleroapi.RestorePhaseCompleted
+				err = k8sClient.Update(ctx, veleroRestore)
+				if err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}, timeout, interval).Should(Succeed())
+}
+
+// verifyVeleroRestoreExists verifies that a velero restore resource exists
+func verifyVeleroRestoreExists(
+	ctx context.Context,
+	k8sClient client.Client,
+	restoreName, namespace string,
+) {
+	veleroRestore := veleroapi.Restore{}
+	Expect(k8sClient.Get(ctx, createLookupKey(restoreName, namespace), &veleroRestore)).ShouldNot(HaveOccurred())
+}
+
+// createAndVerifyResources creates a slice of resources and verifies creation success
+func createAndVerifyResources(ctx context.Context, k8sClient client.Client, resources []client.Object) {
+	for i := range resources {
+		Expect(k8sClient.Create(ctx, resources[i])).Should(Succeed())
+	}
+}

@@ -397,26 +397,7 @@ var _ = Describe("Basic Restore controller", func() {
 			}
 
 			// Now update all the velero restores to simulate that they are complete
-			Eventually(func() error {
-				for _, restoreName := range restoreNames {
-					veleroRestore := &veleroapi.Restore{}
-					err := k8sClient.Get(ctx, createLookupKey(restoreName, veleroNamespace.Name), veleroRestore)
-					if err != nil {
-						return err
-					}
-					if veleroRestore.Status.Phase != veleroapi.RestorePhaseCompleted {
-						veleroRestore.Status.Phase = veleroapi.RestorePhaseCompleted
-						// Velero restore CRD doesn't have status subresource set, so simply update the
-						// status with a normal update() call.
-						err = k8sClient.Update(ctx, veleroRestore)
-						// err = k8sClient.Status().Update(ctx, veleroRestore)
-						if err != nil {
-							return err
-						}
-					}
-				}
-				return nil
-			}, timeout, interval).Should(Succeed())
+			updateVeleroRestoreStatusToCompleted(ctx, k8sClient, restoreNames, veleroNamespace.Name, timeout, interval)
 
 			// TODO: there's a lot more steps in the restore that could be
 			// tested here
@@ -634,30 +615,20 @@ var _ = Describe("Basic Restore controller", func() {
 			createdRestore := v1beta1.Restore{}
 			restoreLookupKey := createLookupKey(restoreName, veleroNamespace.Name)
 			By("created restore should contain velero restore in status")
-			Eventually(func() string {
-				err := k8sClient.Get(ctx, restoreLookupKey, &createdRestore)
-				if err != nil {
-					return ""
-				}
-				return createdRestore.Status.VeleroCredentialsRestoreName
-			}, timeout, interval).Should(BeIdenticalTo("rhacm-restore-1-acm-credentials-schedule-good-old-backup"))
-			Eventually(func() string {
-				err := k8sClient.Get(ctx, restoreLookupKey, &createdRestore)
-				if err != nil {
-					return ""
-				}
-				return createdRestore.Status.VeleroResourcesRestoreName
-			}, timeout, interval).Should(BeIdenticalTo("rhacm-restore-1-acm-resources-schedule-good-old-backup"))
+			waitForRestoreStatusFieldValue(ctx, k8sClient, restoreName, veleroNamespace.Name,
+				func(r *v1beta1.Restore) string { return r.Status.VeleroCredentialsRestoreName },
+				"rhacm-restore-1-acm-credentials-schedule-good-old-backup", timeout, interval)
+			waitForRestoreStatusFieldValue(ctx, k8sClient, restoreName, veleroNamespace.Name,
+				func(r *v1beta1.Restore) string { return r.Status.VeleroResourcesRestoreName },
+				"rhacm-restore-1-acm-resources-schedule-good-old-backup", timeout, interval)
 
 			waitForRestorePhase(ctx, k8sClient, restoreName, veleroNamespace.Name, v1beta1.RestorePhaseUnknown, timeout, interval)
 
+			verifyVeleroRestoreExists(ctx, k8sClient, restoreName+"-acm-credentials-schedule-good-old-backup", veleroNamespace.Name)
+			verifyVeleroRestoreExists(ctx, k8sClient, restoreName+"-acm-resources-schedule-good-old-backup", veleroNamespace.Name)
+
+			// Declare veleroRestore for later use
 			veleroRestore := veleroapi.Restore{}
-			Expect(k8sClient.Get(ctx,
-				createLookupKey(restoreName+"-acm-credentials-schedule-good-old-backup", veleroNamespace.Name),
-				&veleroRestore)).ShouldNot(HaveOccurred())
-			Expect(k8sClient.Get(ctx,
-				createLookupKey(restoreName+"-acm-resources-schedule-good-old-backup", veleroNamespace.Name),
-				&veleroRestore)).ShouldNot(HaveOccurred())
 
 			twoHoursAgo := metav1.NewTime(time.Now().Add(-2 * time.Hour))
 			newVeleroBackups := []veleroapi.Backup{
@@ -684,9 +655,11 @@ var _ = Describe("Basic Restore controller", func() {
 			}
 
 			// create new backups to sync with
+			resources := make([]client.Object, len(newVeleroBackups))
 			for i := range newVeleroBackups {
-				Expect(k8sClient.Create(ctx, &newVeleroBackups[i])).Should(Succeed())
+				resources[i] = &newVeleroBackups[i]
 			}
+			createAndVerifyResources(ctx, k8sClient, resources)
 
 			Eventually(func() string {
 				if err := k8sClient.Get(ctx, restoreLookupKey, &createdRestore); err == nil {
@@ -704,20 +677,12 @@ var _ = Describe("Basic Restore controller", func() {
 			Expect(k8sClient.Update(ctx, &createdRestore)).Should(Succeed())
 
 			By("created restore should now contain new velero backup names in status")
-			Eventually(func() string {
-				err := k8sClient.Get(ctx, restoreLookupKey, &createdRestore)
-				if err != nil {
-					return ""
-				}
-				return createdRestore.Status.VeleroCredentialsRestoreName
-			}, timeout, interval).Should(BeIdenticalTo("rhacm-restore-1-acm-credentials-schedule-good-recent-backup"))
-			Eventually(func() string {
-				err := k8sClient.Get(ctx, restoreLookupKey, &createdRestore)
-				if err != nil {
-					return ""
-				}
-				return createdRestore.Status.VeleroResourcesRestoreName
-			}, timeout, interval).Should(BeIdenticalTo("rhacm-restore-1-acm-resources-schedule-good-recent-backup"))
+			waitForRestoreStatusFieldValue(ctx, k8sClient, restoreName, veleroNamespace.Name,
+				func(r *v1beta1.Restore) string { return r.Status.VeleroCredentialsRestoreName },
+				"rhacm-restore-1-acm-credentials-schedule-good-recent-backup", timeout, interval)
+			waitForRestoreStatusFieldValue(ctx, k8sClient, restoreName, veleroNamespace.Name,
+				func(r *v1beta1.Restore) string { return r.Status.VeleroResourcesRestoreName },
+				"rhacm-restore-1-acm-resources-schedule-good-recent-backup", timeout, interval)
 			// check if new velero restores are created
 			Expect(
 				k8sClient.Get(
@@ -796,43 +761,19 @@ var _ = Describe("Basic Restore controller", func() {
 			veleroBackups = []veleroapi.Backup{}
 		})
 		It("should skip backup restoration when configured with skip option", func() {
-			createdRestore := v1beta1.Restore{}
 			By("created restore should contain velero restore in status")
-			Eventually(func() string {
-				restoreLookupKey := types.NamespacedName{
-					Name:      restoreName,
-					Namespace: veleroNamespace.Name,
-				}
-				err := k8sClient.Get(ctx, restoreLookupKey, &createdRestore)
-				if err != nil {
-					return err.Error()
-				}
-				return createdRestore.Status.VeleroManagedClustersRestoreName
-			}, timeout, interval).Should(BeEmpty())
-			Eventually(func() string {
-				restoreLookupKey := types.NamespacedName{
-					Name:      restoreName,
-					Namespace: veleroNamespace.Name,
-				}
-				err := k8sClient.Get(ctx, restoreLookupKey, &createdRestore)
-				if err != nil {
-					return err.Error()
-				}
-				return createdRestore.Status.VeleroCredentialsRestoreName
-			}, timeout, interval).Should(BeEmpty())
-			Eventually(func() string {
-				restoreLookupKey := types.NamespacedName{
-					Name:      restoreName,
-					Namespace: veleroNamespace.Name,
-				}
-				err := k8sClient.Get(ctx, restoreLookupKey, &createdRestore)
-				if err != nil {
-					return err.Error()
-				}
-				return createdRestore.Status.VeleroResourcesRestoreName
-			}, timeout, interval).Should(BeEmpty())
+			waitForRestoreStatusFieldEmpty(ctx, k8sClient, restoreName, veleroNamespace.Name,
+				func(r *v1beta1.Restore) string { return r.Status.VeleroManagedClustersRestoreName },
+				timeout, interval)
+			waitForRestoreStatusFieldEmpty(ctx, k8sClient, restoreName, veleroNamespace.Name,
+				func(r *v1beta1.Restore) string { return r.Status.VeleroCredentialsRestoreName },
+				timeout, interval)
+			waitForRestoreStatusFieldEmpty(ctx, k8sClient, restoreName, veleroNamespace.Name,
+				func(r *v1beta1.Restore) string { return r.Status.VeleroResourcesRestoreName },
+				timeout, interval)
 
 			veleroRestores := veleroapi.RestoreList{}
+			createdRestore := v1beta1.Restore{}
 			Eventually(func() bool {
 				if err := k8sClient.List(ctx, &veleroRestores, client.InNamespace(veleroNamespace.Name)); err != nil {
 					return false
