@@ -411,9 +411,11 @@ var _ = Describe("Basic Restore controller", func() {
 				// tested here
 
 				// Now the acm restore should proceed to Finished phase
-				waitForRestorePhase(ctx, k8sClient, restoreName, veleroNamespace.Name, v1beta1.RestorePhaseFinished, timeout, interval)
+				waitForRestorePhase(ctx, k8sClient, restoreName, veleroNamespace.Name,
+					v1beta1.RestorePhaseFinished, timeout, interval)
 				// When acm restore is finished CompletionTimestamp should be set
-				waitForCompletionTimestamp(ctx, k8sClient, restoreName, veleroNamespace.Name, timeout, interval)
+				waitForCompletionTimestamp(ctx, k8sClient, restoreName, veleroNamespace.Name,
+					timeout, interval)
 			})
 		})
 
@@ -643,10 +645,13 @@ var _ = Describe("Basic Restore controller", func() {
 					func(r *v1beta1.Restore) string { return r.Status.VeleroResourcesRestoreName },
 					"rhacm-restore-1-acm-resources-schedule-good-old-backup", timeout, interval)
 
-				waitForRestorePhase(ctx, k8sClient, restoreName, veleroNamespace.Name, v1beta1.RestorePhaseUnknown, timeout, interval)
+				waitForRestorePhase(ctx, k8sClient, restoreName, veleroNamespace.Name,
+					v1beta1.RestorePhaseUnknown, timeout, interval)
 
-				verifyVeleroRestoreExists(ctx, k8sClient, restoreName+"-acm-credentials-schedule-good-old-backup", veleroNamespace.Name)
-				verifyVeleroRestoreExists(ctx, k8sClient, restoreName+"-acm-resources-schedule-good-old-backup", veleroNamespace.Name)
+				verifyVeleroRestoreExists(ctx, k8sClient,
+					restoreName+"-acm-credentials-schedule-good-old-backup", veleroNamespace.Name)
+				verifyVeleroRestoreExists(ctx, k8sClient,
+					restoreName+"-acm-resources-schedule-good-old-backup", veleroNamespace.Name)
 
 				// Declare veleroRestore for later use
 				veleroRestore := veleroapi.Restore{}
@@ -1134,7 +1139,8 @@ var _ = Describe("Basic Restore controller", func() {
 					veleroResourcesBackupName(skipRestore).object
 
 				Expect(k8sClient.Create(ctx, &rhacmRestoreIgnored)).Should(Succeed())
-				waitForRestorePhase(ctx, k8sClient, restoreName+"ignored", veleroNamespace.Name, v1beta1.RestorePhaseFinishedWithErrors, timeout, interval)
+				waitForRestorePhase(ctx, k8sClient, restoreName+"ignored", veleroNamespace.Name,
+					v1beta1.RestorePhaseFinishedWithErrors, timeout, interval)
 			})
 		})
 
@@ -1170,7 +1176,8 @@ var _ = Describe("Basic Restore controller", func() {
 			})
 			It("should fail when restore is created in wrong namespace", func() {
 				waitForVeleroRestoreCount(ctx, k8sClient, veleroNamespace.Name, 0, timeout, interval)
-				waitForRestorePhase(ctx, k8sClient, restoreName+"-new", acmNamespaceName, v1beta1.RestorePhaseError, timeout, interval)
+				waitForRestorePhase(ctx, k8sClient, restoreName+"-new", acmNamespaceName,
+					v1beta1.RestorePhaseError, timeout, interval)
 
 				createdRestore := getRestoreWithRetry(ctx, k8sClient, restoreName+"-new", acmNamespaceName, timeout, interval)
 				Expect(
@@ -1207,7 +1214,8 @@ var _ = Describe("Basic Restore controller", func() {
 			})
 			It("should fail when backup storage location is invalid", func() {
 				waitForVeleroRestoreCount(ctx, k8sClient, veleroNamespace.Name, 0, timeout, interval)
-				waitForRestorePhase(ctx, k8sClient, restoreName+"-new", veleroNamespace.Name, v1beta1.RestorePhaseError, timeout, interval)
+				waitForRestorePhase(ctx, k8sClient, restoreName+"-new", veleroNamespace.Name,
+					v1beta1.RestorePhaseError, timeout, interval)
 
 				createdRestore := getRestoreWithRetry(ctx, k8sClient, restoreName+"-new", veleroNamespace.Name, timeout, interval)
 				Expect(
