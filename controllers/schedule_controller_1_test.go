@@ -298,22 +298,32 @@ var _ = Describe("BackupSchedule controller", func() {
 				// Step 3: Wait for Velero schedules to be created
 				By("waiting for velero schedules to be created")
 				veleroSchedules := &veleroapi.ScheduleList{}
+				expectedScheduleCount := len(veleroScheduleNames)
 				Eventually(func() (int, error) {
 					err := k8sClient.List(ctx, veleroSchedules, client.InNamespace(veleroNamespace.Name))
 					if err != nil {
 						return 0, err
 					}
 					return len(veleroSchedules.Items), nil
-				}, timeout, interval).Should(BeNumerically(">", 0))
+				}, timeout, interval).Should(Equal(expectedScheduleCount))
 
 				// Step 4: Verify Velero schedule configuration
 				By("verifying velero schedule configuration")
-				Expect(len(veleroSchedules.Items)).To(BeNumerically(">", 0))
+				Expect(len(veleroSchedules.Items)).To(Equal(expectedScheduleCount))
 
 				// Check configuration of the first schedule
 				firstSchedule := veleroSchedules.Items[0]
 				Expect(firstSchedule.Spec.Schedule).Should(Equal(backupSchedule))
 				Expect(firstSchedule.Spec.Template.TTL).Should(Equal(metav1.Duration{Duration: defaultVeleroTTL}))
+
+				// Verify all expected schedule names are created
+				createdScheduleNames := make([]string, len(veleroSchedules.Items))
+				for i, schedule := range veleroSchedules.Items {
+					createdScheduleNames[i] = schedule.Name
+				}
+				for _, expectedName := range veleroScheduleNames {
+					Expect(createdScheduleNames).To(ContainElement(expectedName))
+				}
 
 				// Step 5: Verify BackupSchedule status reflects Velero schedule creation
 				By("verifying backup schedule status contains velero schedule information")
@@ -440,11 +450,12 @@ var _ = Describe("BackupSchedule controller", func() {
 					object
 			})
 
-			// Test Case: Paused BackupSchedule Handling
+			// Test Case: Paused BackupSchedule Handling and Unpausing
 			//
 			// This test validates that the controller properly handles paused backup schedules
-			// and sets the appropriate status without creating Velero schedules.
-			It("should set paused status and not create velero schedules", func() {
+			// and sets the appropriate status without creating Velero schedules, then tests
+			// the transition from paused to unpaused state.
+			It("should set paused status, not create velero schedules, then create them when unpaused", func() {
 				scheduleLookupKey := createLookupKey(backupScheduleName, veleroNamespace.Name)
 				createdSchedule := v1beta1.BackupSchedule{}
 
@@ -463,7 +474,7 @@ var _ = Describe("BackupSchedule controller", func() {
 					return createdSchedule.Status.Phase == v1beta1.SchedulePhasePaused
 				}, timeout*2, interval).Should(BeTrue())
 
-				// Step 3: Verify no Velero schedules are created
+				// Step 3: Verify no Velero schedules are created while paused
 				By("no velero schedules should be created for paused backup schedule")
 				veleroSchedules := &veleroapi.ScheduleList{}
 				Consistently(func() int {
@@ -474,10 +485,71 @@ var _ = Describe("BackupSchedule controller", func() {
 					return len(veleroSchedules.Items)
 				}, time.Second*2, interval).Should(Equal(0))
 
-				logger.Info("Paused backup schedule test completed successfully",
+				logger.Info("Paused backup schedule test (paused phase) completed successfully",
 					"scheduleName", createdSchedule.Name,
 					"phase", createdSchedule.Status.Phase,
 					"paused", createdSchedule.Spec.Paused)
+
+				// Step 4: Unpause the backup schedule
+				By("unpausing the backup schedule")
+				Eventually(func() error {
+					// Get the latest version of the schedule
+					err := k8sClient.Get(ctx, scheduleLookupKey, &createdSchedule)
+					if err != nil {
+						return err
+					}
+					// Set paused to false
+					createdSchedule.Spec.Paused = false
+					// Update the schedule
+					return k8sClient.Update(ctx, &createdSchedule)
+				}, timeout, interval).Should(Succeed())
+
+				// Step 5: Verify controller processes the unpaused schedule
+				By("backup schedule should transition from paused to enabled phase")
+				Eventually(func() (v1beta1.SchedulePhase, error) {
+					err := k8sClient.Get(ctx, scheduleLookupKey, &createdSchedule)
+					if err != nil {
+						return "", err
+					}
+					return createdSchedule.Status.Phase, nil
+				}, timeout*2, interval).Should(SatisfyAny(
+					Equal(v1beta1.SchedulePhaseEnabled),
+					Equal(v1beta1.SchedulePhaseNew),
+					Not(Equal(v1beta1.SchedulePhasePaused)), // Any phase except paused
+				))
+
+				// Step 6: Verify Velero schedules are now created
+				By("velero schedules should be created after unpausing")
+				expectedScheduleCount := len(veleroScheduleNames)
+				Eventually(func() (int, error) {
+					err := k8sClient.List(ctx, veleroSchedules, client.InNamespace(veleroNamespace.Name))
+					if err != nil {
+						return 0, err
+					}
+					return len(veleroSchedules.Items), nil
+				}, timeout*2, interval).Should(Equal(expectedScheduleCount))
+
+				// Step 7: Verify Velero schedule configuration
+				By("verifying velero schedule configuration after unpausing")
+				Expect(len(veleroSchedules.Items)).To(Equal(expectedScheduleCount))
+				firstSchedule := veleroSchedules.Items[0]
+				Expect(firstSchedule.Spec.Schedule).Should(Equal(backupSchedule))
+				Expect(firstSchedule.Spec.Template.TTL).Should(Equal(metav1.Duration{Duration: defaultVeleroTTL}))
+
+				// Verify all expected schedule names are created after unpausing
+				createdScheduleNames := make([]string, len(veleroSchedules.Items))
+				for i, schedule := range veleroSchedules.Items {
+					createdScheduleNames[i] = schedule.Name
+				}
+				for _, expectedName := range veleroScheduleNames {
+					Expect(createdScheduleNames).To(ContainElement(expectedName))
+				}
+
+				logger.Info("Paused backup schedule test (unpause transition) completed successfully",
+					"scheduleName", createdSchedule.Name,
+					"phase", createdSchedule.Status.Phase,
+					"paused", createdSchedule.Spec.Paused,
+					"veleroSchedules", len(veleroSchedules.Items))
 			})
 		})
 	})
