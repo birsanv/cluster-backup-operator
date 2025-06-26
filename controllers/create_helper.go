@@ -733,6 +733,9 @@ func createDefaultChannels() []chnv1.Channel {
 			channelFinalizers([]string{"finalizer1"}).object,
 		*createChannel("channel-not-from-backup", "default",
 			chnv1.ChannelTypeGit, "https://github.com/test/app-samples").object,
+		// Add charts-v1 channel to test the backup exclusion logic
+		*createChannel("charts-v1", "default",
+			chnv1.ChannelTypeHelmRepo, "http://charts.svc.cluster.local:3000/charts").object,
 	}
 }
 
