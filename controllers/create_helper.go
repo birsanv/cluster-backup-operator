@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"time"
 
-	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -13,6 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	. "github.com/onsi/gomega" //nolint:staticcheck
 	ocinfrav1 "github.com/openshift/api/config/v1"
 	v1beta1 "github.com/stolostron/cluster-backup-operator/api/v1beta1"
 	veleroapi "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
@@ -508,11 +508,6 @@ func (b *BackupScheduleHelper) useManagedServiceAccount(usemsa bool) *BackupSche
 	return b
 }
 
-func (b *BackupScheduleHelper) managedServiceAccountTTL(ttl metav1.Duration) *BackupScheduleHelper {
-	b.object.Spec.ManagedServiceAccountTTL = ttl
-	return b
-}
-
 func (b *BackupScheduleHelper) phase(ph v1beta1.SchedulePhase) *BackupScheduleHelper {
 	b.object.Status.Phase = ph
 	return b
@@ -534,21 +529,6 @@ func (b *BackupScheduleHelper) scheduleStatus(scheduleType ResourceType, sch vel
 
 func (b *BackupScheduleHelper) noBackupOnStart(stopBackupOnStart bool) *BackupScheduleHelper {
 	b.object.Spec.NoBackupOnStart = stopBackupOnStart
-	return b
-}
-
-func (b *BackupScheduleHelper) setVolumeSnapshotLocation(locations []string) *BackupScheduleHelper {
-	b.object.Spec.VolumeSnapshotLocations = locations
-	return b
-}
-
-func (b *BackupScheduleHelper) useOwnerReferencesInBackup(useOwnerReferences bool) *BackupScheduleHelper {
-	b.object.Spec.UseOwnerReferencesInBackup = useOwnerReferences
-	return b
-}
-
-func (b *BackupScheduleHelper) skipImmediately(skipImmediately bool) *BackupScheduleHelper {
-	b.object.Spec.SkipImmediately = skipImmediately
 	return b
 }
 
@@ -654,7 +634,7 @@ type ChannelHelper struct {
 	object *chnv1.Channel
 }
 
-func createChannel(name string, ns string, ctype chnv1.ChannelType, path string) *ChannelHelper {
+func createChannel(name string, ctype chnv1.ChannelType, path string) *ChannelHelper {
 	return &ChannelHelper{
 		object: &chnv1.Channel{
 			TypeMeta: metav1.TypeMeta{
@@ -663,7 +643,7 @@ func createChannel(name string, ns string, ctype chnv1.ChannelType, path string)
 			},
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      name,
-				Namespace: ns,
+				Namespace: "default",
 			},
 			Spec: chnv1.ChannelSpec{
 				Type:     ctype,
@@ -720,21 +700,21 @@ func createDefaultClusterVersions() []ocinfrav1.ClusterVersion {
 // createDefaultChannels creates standard channel test data
 func createDefaultChannels() []chnv1.Channel {
 	return []chnv1.Channel{
-		*createChannel("channel-from-backup", "default",
+		*createChannel("channel-from-backup",
 			chnv1.ChannelTypeHelmRepo, "http://test.svc.cluster.local:3000/charts").
 			channelLabels(map[string]string{
 				"velero.io/backup-name": "backup-123",
 			}).object,
-		*createChannel("channel-from-backup-with-finalizers", "default",
+		*createChannel("channel-from-backup-with-finalizers",
 			chnv1.ChannelTypeHelmRepo, "http://test.svc.cluster.local:3000/charts").
 			channelLabels(map[string]string{
 				"velero.io/backup-name": "backup-123",
 			}).
 			channelFinalizers([]string{"finalizer1"}).object,
-		*createChannel("channel-not-from-backup", "default",
+		*createChannel("channel-not-from-backup",
 			chnv1.ChannelTypeGit, "https://github.com/test/app-samples").object,
 		// Add charts-v1 channel to test the backup exclusion logic
-		*createChannel("charts-v1", "default",
+		*createChannel("charts-v1",
 			chnv1.ChannelTypeHelmRepo, "http://charts.svc.cluster.local:3000/charts").object,
 	}
 }
@@ -895,23 +875,6 @@ func waitForVeleroRestoreCount(
 	}, timeout, interval).Should(Equal(expectedCount))
 }
 
-// waitForVeleroRestoreCountToBe waits for velero restores count to match condition
-func waitForVeleroRestoreCountToBe(
-	ctx context.Context,
-	k8sClient client.Client,
-	namespace string,
-	condition func(int) bool,
-	timeout, interval time.Duration,
-) {
-	veleroRestores := veleroapi.RestoreList{}
-	Eventually(func() bool {
-		if err := k8sClient.List(ctx, &veleroRestores, client.InNamespace(namespace)); err != nil {
-			return false
-		}
-		return condition(len(veleroRestores.Items))
-	}, timeout, interval).Should(BeTrue())
-}
-
 // getRestoreWithRetry gets a restore resource with retry logic
 func getRestoreWithRetry(
 	ctx context.Context,
@@ -928,29 +891,6 @@ func getRestoreWithRetry(
 		return k8sClient.Get(ctx, restoreLookupKey, restore)
 	}, timeout, interval).Should(Succeed())
 	return restore
-}
-
-// waitForRestoreStatusField waits for a specific restore status field to have expected value
-func waitForRestoreStatusField(
-	ctx context.Context,
-	k8sClient client.Client,
-	restoreName, namespace string,
-	fieldExtractor func(*v1beta1.Restore) string,
-	expectedValue string,
-	timeout, interval time.Duration,
-) {
-	Eventually(func() string {
-		restore := v1beta1.Restore{}
-		restoreLookupKey := types.NamespacedName{
-			Name:      restoreName,
-			Namespace: namespace,
-		}
-		err := k8sClient.Get(ctx, restoreLookupKey, &restore)
-		if err != nil {
-			return ""
-		}
-		return fieldExtractor(&restore)
-	}, timeout, interval).Should(Equal(expectedValue))
 }
 
 // waitForRestoreStatusFieldEmpty waits for a specific restore status field to be empty
@@ -1091,78 +1031,4 @@ func createAndVerifyResources(ctx context.Context, k8sClient client.Client, reso
 	for i := range resources {
 		Expect(k8sClient.Create(ctx, resources[i])).Should(Succeed())
 	}
-}
-
-// waitForObjectCreation waits for a Kubernetes object to be successfully created and retrievable
-func waitForObjectCreation(
-	ctx context.Context,
-	k8sClient client.Client,
-	objectKey client.ObjectKey,
-	obj client.Object,
-	timeout, interval time.Duration,
-) {
-	Eventually(func() bool {
-		err := k8sClient.Get(ctx, objectKey, obj)
-		return err == nil
-	}, timeout, interval).Should(BeTrue())
-}
-
-// waitForObjectCreationAndGet waits for object creation and ensures the object is populated with current data
-func waitForObjectCreationAndGet(
-	ctx context.Context,
-	k8sClient client.Client,
-	objectKey client.ObjectKey,
-	obj client.Object,
-	timeout, interval time.Duration,
-) {
-	waitForObjectCreation(ctx, k8sClient, objectKey, obj, timeout, interval)
-	// Ensure we have the latest data
-	Eventually(func() error {
-		return k8sClient.Get(ctx, objectKey, obj)
-	}, timeout, interval).Should(Succeed())
-}
-
-// waitForSchedulePhase waits for a BackupSchedule to reach the specified phase
-func waitForSchedulePhase(
-	ctx context.Context,
-	k8sClient client.Client,
-	scheduleName, namespace string,
-	expectedPhase v1beta1.SchedulePhase,
-	timeout, interval time.Duration,
-) {
-	Eventually(func() v1beta1.SchedulePhase {
-		schedule := v1beta1.BackupSchedule{}
-		err := k8sClient.Get(ctx, createLookupKey(scheduleName, namespace), &schedule)
-		if err != nil {
-			return ""
-		}
-		return schedule.Status.Phase
-	}, timeout, interval).Should(BeEquivalentTo(expectedPhase))
-}
-
-// createBackupScheduleWithDefaults creates a BackupSchedule with commonly used default settings
-func createBackupScheduleWithDefaults(name, namespace, cronSchedule string, veleroTTL, msaTTL metav1.Duration) *v1beta1.BackupSchedule {
-	return createBackupSchedule(name, namespace).
-		schedule(cronSchedule).
-		veleroTTL(veleroTTL).
-		useManagedServiceAccount(true).
-		managedServiceAccountTTL(msaTTL).
-		setVolumeSnapshotLocation([]string{"dpa-1"}).
-		useOwnerReferencesInBackup(true).
-		skipImmediately(true).
-		object
-}
-
-// waitForListOperation waits for a list operation to succeed
-func waitForListOperation(
-	ctx context.Context,
-	k8sClient client.Client,
-	list client.ObjectList,
-	timeout, interval time.Duration,
-	opts ...client.ListOption,
-) {
-	Eventually(func() bool {
-		err := k8sClient.List(ctx, list, opts...)
-		return err == nil
-	}, timeout, interval).Should(BeTrue())
 }
