@@ -29,7 +29,6 @@ import (
 	clusterv1 "open-cluster-management.io/api/cluster/v1"
 	chnv1 "open-cluster-management.io/multicloud-operators-channel/pkg/apis/apps/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 )
 
 // BackupSchedule Controller Integration Test Suite
@@ -39,7 +38,6 @@ import (
 // error handling. Each test context focuses on a specific aspect of the backup schedule
 // workflow to ensure proper isolation and clear failure diagnosis.
 var _ = Describe("BackupSchedule controller", func() {
-	logger := zap.New(zap.UseDevMode(true), zap.WriteTo(GinkgoWriter))
 
 	// Test Variables Documentation
 	//
@@ -337,10 +335,6 @@ var _ = Describe("BackupSchedule controller", func() {
 					return hasVeleroSchedules, nil
 				}, timeout, interval).Should(BeTrue())
 
-				logger.Info("BackupSchedule test completed successfully",
-					"scheduleName", createdSchedule.Name,
-					"phase", createdSchedule.Status.Phase,
-					"veleroSchedules", len(veleroSchedules.Items))
 			})
 		})
 
@@ -393,10 +387,6 @@ var _ = Describe("BackupSchedule controller", func() {
 					return len(veleroSchedules.Items), nil
 				}, time.Second*2, interval).Should(Equal(0))
 
-				logger.Info("Invalid cron expression test completed successfully",
-					"scheduleName", createdSchedule.Name,
-					"phase", createdSchedule.Status.Phase,
-					"errorMessage", createdSchedule.Status.LastMessage)
 			})
 		})
 
@@ -433,10 +423,6 @@ var _ = Describe("BackupSchedule controller", func() {
 						createdSchedule.Status.LastMessage != ""
 				}, timeout*2, interval).Should(BeTrue())
 
-				logger.Info("Unavailable storage location test completed",
-					"scheduleName", createdSchedule.Name,
-					"phase", createdSchedule.Status.Phase,
-					"message", createdSchedule.Status.LastMessage)
 			})
 		})
 
@@ -484,11 +470,6 @@ var _ = Describe("BackupSchedule controller", func() {
 					}
 					return len(veleroSchedules.Items)
 				}, time.Second*2, interval).Should(Equal(0))
-
-				logger.Info("Paused backup schedule test (paused phase) completed successfully",
-					"scheduleName", createdSchedule.Name,
-					"phase", createdSchedule.Status.Phase,
-					"paused", createdSchedule.Spec.Paused)
 
 				// Step 4: Unpause the backup schedule
 				By("unpausing the backup schedule")
@@ -545,11 +526,221 @@ var _ = Describe("BackupSchedule controller", func() {
 					Expect(createdScheduleNames).To(ContainElement(expectedName))
 				}
 
-				logger.Info("Paused backup schedule test (unpause transition) completed successfully",
-					"scheduleName", createdSchedule.Name,
-					"phase", createdSchedule.Status.Phase,
-					"paused", createdSchedule.Spec.Paused,
-					"veleroSchedules", len(veleroSchedules.Items))
+			})
+		})
+
+		Context("when testing backup collision detection", func() {
+			BeforeEach(func() {
+				// Create a BackupSchedule that will have existing Velero schedules
+				// to trigger the collision detection logic
+				rhacmBackupSchedule = *createBackupSchedule(backupScheduleName, veleroNamespace.Name).
+					schedule(backupSchedule).
+					veleroTTL(metav1.Duration{Duration: defaultVeleroTTL}).
+					object
+			})
+
+			// Test Case: Backup Collision Detection Logic
+			//
+			// This test validates the backup collision detection logic that runs when
+			// Velero schedules already exist and the schedule is older than 5 seconds.
+			// This covers the code path around line 173 in schedule_controller.go
+			It("should detect backup collision when another cluster owns the backups", func() {
+				scheduleLookupKey := createLookupKey(backupScheduleName, veleroNamespace.Name)
+				createdSchedule := v1beta1.BackupSchedule{}
+
+				// Step 1: Create the BackupSchedule and wait for initial Velero schedules
+				By("creating backup schedule and waiting for initial velero schedules")
+				Eventually(func() error {
+					return k8sClient.Get(ctx, scheduleLookupKey, &createdSchedule)
+				}, timeout, interval).Should(Succeed())
+
+				// Wait for Velero schedules to be created
+				veleroSchedules := &veleroapi.ScheduleList{}
+				expectedScheduleCount := len(veleroScheduleNames)
+				Eventually(func() (int, error) {
+					err := k8sClient.List(ctx, veleroSchedules, client.InNamespace(veleroNamespace.Name))
+					if err != nil {
+						return 0, err
+					}
+					return len(veleroSchedules.Items), nil
+				}, timeout, interval).Should(Equal(expectedScheduleCount))
+
+				// Step 2: Create mock backup resources that simulate our cluster owning some backups
+				By("creating mock backup resources owned by our cluster")
+				ourClusterID := "our-cluster-id"
+				baseTime := time.Now().Add(-10 * time.Minute) // Older backups
+
+				// Create a few backups that our cluster owns
+				ourBackup1 := &veleroapi.Backup{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "acm-resources-schedule-our-backup-1",
+						Namespace: veleroNamespace.Name,
+						Labels: map[string]string{
+							"cluster.open-cluster-management.io/backup-cluster": ourClusterID,
+							"velero.io/schedule-name":                           veleroScheduleNames[Resources],
+						},
+						CreationTimestamp: metav1.NewTime(baseTime),
+					},
+					Spec: veleroapi.BackupSpec{
+						StorageLocation: "default",
+						TTL:             metav1.Duration{Duration: defaultVeleroTTL},
+					},
+					Status: veleroapi.BackupStatus{
+						Phase:          veleroapi.BackupPhaseCompleted,
+						StartTimestamp: &metav1.Time{Time: baseTime},
+					},
+				}
+				Expect(k8sClient.Create(ctx, ourBackup1)).Should(Succeed())
+
+				ourBackup2 := &veleroapi.Backup{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "acm-resources-schedule-our-backup-2",
+						Namespace: veleroNamespace.Name,
+						Labels: map[string]string{
+							"cluster.open-cluster-management.io/backup-cluster": ourClusterID,
+							"velero.io/schedule-name":                           veleroScheduleNames[Resources],
+						},
+						CreationTimestamp: metav1.NewTime(baseTime.Add(5 * time.Minute)),
+					},
+					Spec: veleroapi.BackupSpec{
+						StorageLocation: "default",
+						TTL:             metav1.Duration{Duration: defaultVeleroTTL},
+					},
+					Status: veleroapi.BackupStatus{
+						Phase:          veleroapi.BackupPhaseCompleted,
+						StartTimestamp: &metav1.Time{Time: baseTime.Add(5 * time.Minute)},
+					},
+				}
+				Expect(k8sClient.Create(ctx, ourBackup2)).Should(Succeed())
+
+				// Step 3: Create a Velero backup that appears to be owned by another cluster FIRST
+				// This will simulate a backup collision scenario - it will be the LATEST backup
+				By("creating a velero backup owned by another cluster to simulate collision")
+				conflictTime := time.Now().Add(10 * time.Minute) // Make this clearly the latest backup
+				conflictingBackup := &veleroapi.Backup{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "acm-resources-schedule-conflicting-backup",
+						Namespace: veleroNamespace.Name,
+						Labels: map[string]string{
+							"cluster.open-cluster-management.io/backup-cluster": "other-cluster-id",
+							"velero.io/schedule-name":                           veleroScheduleNames[Resources],
+						},
+						CreationTimestamp: metav1.NewTime(conflictTime),
+					},
+					Spec: veleroapi.BackupSpec{
+						StorageLocation: "default",
+						TTL:             metav1.Duration{Duration: defaultVeleroTTL},
+					},
+					Status: veleroapi.BackupStatus{
+						Phase:          veleroapi.BackupPhaseCompleted,
+						StartTimestamp: &metav1.Time{Time: conflictTime}, // Latest timestamp - 10 minutes in the future
+					},
+				}
+				Expect(k8sClient.Create(ctx, conflictingBackup)).Should(Succeed())
+
+				// Step 3.1: Wait for the first schedule (credentials) to be older than 5 seconds
+				// The original collision detection logic checks veleroScheduleList.Items[0] for age
+				By("waiting for the first velero schedule to be older than 5 seconds")
+				Eventually(func() (bool, error) {
+					veleroScheduleList := &veleroapi.ScheduleList{}
+					err := k8sClient.List(ctx, veleroScheduleList, client.InNamespace(veleroNamespace.Name))
+					if err != nil {
+						return false, err
+					}
+					if len(veleroScheduleList.Items) == 0 {
+						return false, nil
+					}
+					// Check if the first schedule is older than 5 seconds
+					ageSeconds := time.Since(veleroScheduleList.Items[0].CreationTimestamp.Time).Seconds()
+					return ageSeconds > 5, nil
+				}, timeout*2, interval).Should(BeTrue())
+
+				// Step 4: Update all velero schedules to have proper status and labels
+				By("updating velero schedules to appear enabled and set cluster ID")
+				Eventually(func() error {
+					veleroScheduleList := &veleroapi.ScheduleList{}
+					err := k8sClient.List(ctx, veleroScheduleList, client.InNamespace(veleroNamespace.Name))
+					if err != nil {
+						return err
+					}
+
+					// Update all schedules to appear "enabled" and set proper labels
+					for i := range veleroScheduleList.Items {
+						schedule := &veleroScheduleList.Items[i]
+
+						// Set status to make schedule appear enabled
+						schedule.Status.Phase = veleroapi.SchedulePhaseEnabled
+
+						// Set labels with our cluster ID
+						if schedule.Labels == nil {
+							schedule.Labels = make(map[string]string)
+						}
+						schedule.Labels["cluster.open-cluster-management.io/backup-cluster"] = ourClusterID
+
+						// Update the schedule
+						err = k8sClient.Update(ctx, schedule)
+						if err != nil {
+							return err
+						}
+					}
+					return nil
+				}, timeout, interval).Should(Succeed())
+
+				// Step 4.1: Verify the cluster label is set on velero schedules for debugging
+				By("verifying velero schedules have the cluster ID set")
+				Eventually(func() (bool, error) {
+					veleroScheduleList := &veleroapi.ScheduleList{}
+					err := k8sClient.List(ctx, veleroScheduleList, client.InNamespace(veleroNamespace.Name))
+					if err != nil {
+						return false, err
+					}
+
+					for _, schedule := range veleroScheduleList.Items {
+						if schedule.Labels["cluster.open-cluster-management.io/backup-cluster"] != ourClusterID {
+							return false, nil
+						}
+					}
+					return true, nil
+				}, timeout, interval).Should(BeTrue())
+
+				// The schedule age check is now handled in step 3.1 above
+
+				// Step 6: Wait briefly for collision detection to be triggered
+				//time.Sleep(2 * time.Second)
+
+				// Step 7: Verify the controller detects the backup collision
+				// The schedule should be set to SchedulePhaseBackupCollision since another cluster owns the backups
+				By("verifying collision detection identifies the backup collision")
+				Eventually(func() (v1beta1.SchedulePhase, error) {
+					err := k8sClient.Get(ctx, scheduleLookupKey, &createdSchedule)
+					if err != nil {
+						return "", err
+					}
+
+					return createdSchedule.Status.Phase, nil
+				}, timeout*2, interval).Should(Equal(v1beta1.SchedulePhaseBackupCollision))
+
+				// Step 8: Verify the collision message is set
+				By("verifying collision message is set in status")
+				Eventually(func() (string, error) {
+					err := k8sClient.Get(ctx, scheduleLookupKey, &createdSchedule)
+					if err != nil {
+						return "", err
+					}
+					return createdSchedule.Status.LastMessage, nil
+				}, timeout, interval).Should(ContainSubstring("other-cluster-id"))
+
+				// Step 9: Verify the controller is properly handling the collision state
+				// When a collision is detected, the controller should ignore the BackupSchedule
+				By("verifying the backup schedule remains in collision state")
+				Consistently(func() (v1beta1.SchedulePhase, error) {
+					err := k8sClient.Get(ctx, scheduleLookupKey, &createdSchedule)
+					if err != nil {
+						return "", err
+					}
+					return createdSchedule.Status.Phase, nil
+				}, 1*time.Second, interval).Should(Equal(v1beta1.SchedulePhaseBackupCollision))
+
 			})
 		})
 	})
