@@ -515,20 +515,12 @@ var _ = Describe("BackupSchedule controller", func() {
 			waitForObjectCreation(ctx, k8sClient, backupLookupKey, &createdBackupSchedule, timeout, interval)
 
 			// validate baremetal secret has backup annotation
-			baremetalSecret := corev1.Secret{}
-			Eventually(func() bool {
-				err := k8sClient.Get(ctx, createLookupKey(baremetalSecretName, clusterPoolNSName), &baremetalSecret)
-				return err == nil &&
-					baremetalSecret.GetLabels()["cluster.open-cluster-management.io/backup"] == "baremetal"
-			}, timeout, interval).Should(BeTrue())
+			waitForSecretLabel(ctx, k8sClient, baremetalSecretName, clusterPoolNSName,
+				"cluster.open-cluster-management.io/backup", "baremetal", timeout, interval)
 
 			// and the ones under openshift-machine-api dont
-			baremetalSecretAPI := corev1.Secret{}
-			Eventually(func() bool {
-				err := k8sClient.Get(ctx, createLookupKey(baremetalAPISecretName, defaultMachineAPINS), &baremetalSecretAPI)
-				return err == nil &&
-					baremetalSecretAPI.GetLabels()["cluster.open-cluster-management.io/backup"] == "baremetal"
-			}, timeout, interval).Should(BeFalse())
+			waitForSecretLabelMissing(ctx, k8sClient, baremetalAPISecretName, defaultMachineAPINS,
+				"cluster.open-cluster-management.io/backup", "baremetal", timeout, interval)
 
 			// validate auto-import secret secret has backup annotation
 			// if the UseManagedServiceAccount is set to true
@@ -592,12 +584,8 @@ var _ = Describe("BackupSchedule controller", func() {
 			}
 
 			// validate AI secret has backup annotation
-			secretAI := corev1.Secret{}
-			Eventually(func() bool {
-				err := k8sClient.Get(ctx, createLookupKey(aiSecretName, clusterPoolNSName), &secretAI)
-				return err == nil &&
-					secretAI.GetLabels()["cluster.open-cluster-management.io/backup"] == "agent-install"
-			}, timeout, interval).Should(BeTrue())
+			waitForSecretLabel(ctx, k8sClient, aiSecretName, clusterPoolNSName,
+				"cluster.open-cluster-management.io/backup", "agent-install", timeout, interval)
 
 			Expect(createdBackupSchedule.CreationTimestamp.Time).NotTo(BeNil())
 
@@ -608,26 +596,22 @@ var _ = Describe("BackupSchedule controller", func() {
 			).Should(Equal(metav1.Duration{Duration: defaultVeleroTTL}))
 
 			By("created backup schedule should contain velero schedules in status")
+			waitForBackupScheduleVeleroSchedules(ctx, k8sClient, backupScheduleName, veleroNamespaceName, timeout, interval)
+
+			// verify the acm charts channel ns is excluded
 			Eventually(func() bool {
 				err := k8sClient.Get(ctx, backupLookupKey, &createdBackupSchedule)
 				if err != nil {
 					return false
 				}
-
-				schedulesCreated := createdBackupSchedule.Status.VeleroScheduleCredentials != nil &&
-					createdBackupSchedule.Status.VeleroScheduleManagedClusters != nil &&
-					createdBackupSchedule.Status.VeleroScheduleResources != nil
-
-				if schedulesCreated {
-					// verify the acm charts channel ns is excluded
-					_, chartsNSOK := find(
-						createdBackupSchedule.Status.VeleroScheduleResources.Spec.Template.ExcludedNamespaces,
-						chartsv1NSName,
-					)
-					return chartsNSOK
+				if createdBackupSchedule.Status.VeleroScheduleResources == nil {
+					return false
 				}
-
-				return schedulesCreated
+				_, chartsNSOK := find(
+					createdBackupSchedule.Status.VeleroScheduleResources.Spec.Template.ExcludedNamespaces,
+					chartsv1NSName,
+				)
+				return chartsNSOK
 			}, timeout, interval).Should(BeTrue())
 
 			Expect(
@@ -654,20 +638,11 @@ var _ = Describe("BackupSchedule controller", func() {
 					Update(context.Background(), &createdBackupSchedule, &client.UpdateOptions{}),
 			).Should(Succeed())
 
-			Eventually(func() metav1.Duration {
-				err := k8sClient.Get(ctx, backupLookupKey, &createdBackupSchedule)
-				if err != nil {
-					return metav1.Duration{Duration: zeroTTL}
-				}
-				return createdBackupSchedule.Spec.VeleroTTL
-			}, timeout, interval).Should(BeIdenticalTo(metav1.Duration{Duration: extendedTTL}))
+			waitForBackupScheduleTTL(ctx, k8sClient, backupScheduleName, veleroNamespaceName, extendedTTL, timeout, interval)
 
 			// delete one schedule, it should trigger velero schedules recreation
 			veleroSchedulesList := veleroapi.ScheduleList{}
-			Eventually(func() bool {
-				err := k8sClient.List(ctx, &veleroSchedulesList, &client.ListOptions{})
-				return err == nil
-			}, timeout, interval).Should(BeTrue())
+			waitForListOperation(ctx, k8sClient, &veleroSchedulesList, timeout, interval, &client.ListOptions{})
 			// check the volumeSnapshotLocation property
 			Expect(
 				veleroSchedulesList.Items[1].Spec.Template.VolumeSnapshotLocations,
@@ -699,12 +674,7 @@ var _ = Describe("BackupSchedule controller", func() {
 
 			Expect(k8sClient.Delete(ctx, &veleroSchedulesList.Items[1])).To(Succeed()) // Manually delete a schedule
 			// count velero schedules, should be still len(veleroScheduleNames)
-			Eventually(func() int {
-				if err := k8sClient.List(ctx, &veleroSchedulesList, &client.ListOptions{}); err == nil {
-					return len(veleroSchedulesList.Items)
-				}
-				return 0
-			}, longTimeout, interval).Should(BeNumerically("==", len(veleroScheduleNames)))
+			waitForVeleroScheduleCount(ctx, k8sClient, "", len(veleroScheduleNames), longTimeout, interval)
 
 			// check that the velero schedules have now 150h for ttl
 			Eventually(func() metav1.Duration {
@@ -899,14 +869,14 @@ var _ = Describe("BackupSchedule controller", func() {
 			// the acm backupschedule object ( these velero schedules are len(veleroScheduleNames))
 			// acmSchedulesList represents the ACM - BackupSchedule.cluster.open-cluster-management.io - schedules
 			// created by the tests
+			waitForBackupScheduleCountGTE(ctx, k8sClient, expectedACMScheduleCount, timeout, interval)
 			acmSchedulesList := v1beta1.BackupScheduleList{}
 			waitForListOperation(ctx, k8sClient, &acmSchedulesList, timeout, interval, &client.ListOptions{})
-			Expect(len(acmSchedulesList.Items)).To(BeNumerically(">=", expectedACMScheduleCount))
 
 			// count velero schedules
+			waitForVeleroScheduleCount(ctx, k8sClient, "", len(veleroScheduleNames), timeout, interval)
 			veleroScheduleList := veleroapi.ScheduleList{}
 			waitForListOperation(ctx, k8sClient, &veleroScheduleList, timeout, interval, &client.ListOptions{})
-			Expect(len(veleroScheduleList.Items)).To(BeNumerically("==", len(veleroScheduleNames)))
 
 			for i := range veleroScheduleList.Items {
 
@@ -958,8 +928,7 @@ var _ = Describe("BackupSchedule controller", func() {
 			}
 
 			// acm schedules are 0 now
-			waitForListOperation(ctx, k8sClient, &acmSchedulesList, timeout, interval, &client.ListOptions{})
-			Expect(len(acmSchedulesList.Items)).To(BeNumerically("==", 0))
+			waitForBackupScheduleCount(ctx, k8sClient, 0, timeout, interval)
 		})
 	})
 
@@ -1000,13 +969,7 @@ var _ = Describe("BackupSchedule controller", func() {
 
 				Expect(k8sClient.Create(ctx, &rhacmBackupSchedule)).Should(Succeed())
 				// there is no storage location object created
-				veleroSchedules := veleroapi.ScheduleList{}
-				Eventually(func() bool {
-					if err := k8sClient.List(ctx, &veleroSchedules, client.InNamespace(newVeleroNamespace)); err != nil {
-						return false
-					}
-					return len(veleroSchedules.Items) == 0
-				}, timeout, interval).Should(BeTrue())
+				waitForVeleroScheduleCount(ctx, k8sClient, newVeleroNamespace, 0, timeout, interval)
 				createdSchedule := v1beta1.BackupSchedule{}
 				waitForSchedulePhase(ctx, k8sClient, backupScheduleName+"-new", newVeleroNamespace, v1beta1.SchedulePhaseFailedValidation, timeout, interval)
 				// Get the schedule to check the status message
