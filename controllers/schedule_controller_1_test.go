@@ -743,5 +743,164 @@ var _ = Describe("BackupSchedule controller", func() {
 
 			})
 		})
+
+		Context("when testing manual schedule deletion and recreation", func() {
+			BeforeEach(func() {
+				// Create a BackupSchedule that will create Velero schedules
+				rhacmBackupSchedule = *createBackupSchedule(backupScheduleName, veleroNamespace.Name).
+					schedule(backupSchedule).
+					veleroTTL(metav1.Duration{Duration: defaultVeleroTTL}).
+					object
+			})
+
+			// Test Case: Manual Schedule Deletion and Recreation Logic
+			//
+			// This test validates the schedule recreation logic that runs when some Velero
+			// schedules have been manually deleted. This covers line 227 in schedule_controller.go
+			// where deleteVeleroSchedules() is called to recreate all schedules.
+			It("should recreate all schedules when some are manually deleted", func() {
+				scheduleLookupKey := createLookupKey(backupScheduleName, veleroNamespace.Name)
+				createdSchedule := v1beta1.BackupSchedule{}
+
+				// Step 1: Create the BackupSchedule and wait for all Velero schedules to be created
+				By("creating backup schedule and waiting for all velero schedules")
+				Eventually(func() error {
+					return k8sClient.Get(ctx, scheduleLookupKey, &createdSchedule)
+				}, timeout, interval).Should(Succeed())
+
+				// Wait for all 5 Velero schedules to be created
+				veleroSchedules := &veleroapi.ScheduleList{}
+				expectedScheduleCount := len(veleroScheduleNames)
+				Eventually(func() (int, error) {
+					err := k8sClient.List(ctx, veleroSchedules, client.InNamespace(veleroNamespace.Name))
+					if err != nil {
+						return 0, err
+					}
+					return len(veleroSchedules.Items), nil
+				}, timeout, interval).Should(Equal(expectedScheduleCount))
+
+				// Step 2: Verify all expected schedules are created
+				By("verifying all expected velero schedules are created")
+				Expect(len(veleroSchedules.Items)).To(Equal(expectedScheduleCount))
+
+				// Collect the names of created schedules
+				createdScheduleNames := make([]string, len(veleroSchedules.Items))
+				for i, schedule := range veleroSchedules.Items {
+					createdScheduleNames[i] = schedule.Name
+				}
+
+				// Verify all expected schedule names exist
+				for _, expectedName := range veleroScheduleNames {
+					Expect(createdScheduleNames).To(ContainElement(expectedName))
+				}
+
+				// Step 3: Manually delete some of the Velero schedules to simulate manual deletion
+				By("manually deleting some velero schedules to trigger recreation logic")
+				schedulesToDelete := 2 // Delete 2 out of 5 schedules
+
+				for i := 0; i < schedulesToDelete; i++ {
+					scheduleToDelete := &veleroSchedules.Items[i]
+					Expect(k8sClient.Delete(ctx, scheduleToDelete)).Should(Succeed())
+				}
+
+				// Step 4: Verify some schedules are deleted (should have fewer than expected)
+				By("verifying some schedules are deleted")
+				Eventually(func() (int, error) {
+					err := k8sClient.List(ctx, veleroSchedules, client.InNamespace(veleroNamespace.Name))
+					if err != nil {
+						return 0, err
+					}
+					return len(veleroSchedules.Items), nil
+				}, timeout, interval).Should(BeNumerically("<", expectedScheduleCount))
+
+				// Step 5: Trigger reconciliation by updating the BackupSchedule
+				// This will cause the controller to detect the missing schedules
+				By("triggering reconciliation to detect missing schedules")
+				Eventually(func() error {
+					err := k8sClient.Get(ctx, scheduleLookupKey, &createdSchedule)
+					if err != nil {
+						return err
+					}
+					// Add an annotation to trigger reconciliation
+					if createdSchedule.Annotations == nil {
+						createdSchedule.Annotations = make(map[string]string)
+					}
+					createdSchedule.Annotations["test.schedule.recreation"] = time.Now().Format(time.RFC3339)
+					return k8sClient.Update(ctx, &createdSchedule)
+				}, timeout, interval).Should(Succeed())
+
+				// Step 6: Wait for the controller to detect missing schedules and recreate all of them
+				// The controller should delete all remaining schedules and recreate all 5
+				By("waiting for controller to recreate all velero schedules")
+				Eventually(func() (int, error) {
+					err := k8sClient.List(ctx, veleroSchedules, client.InNamespace(veleroNamespace.Name))
+					if err != nil {
+						return 0, err
+					}
+					return len(veleroSchedules.Items), nil
+				}, timeout*3, interval).Should(Equal(expectedScheduleCount))
+
+				// Step 7: Verify all expected schedules are recreated with proper configuration
+				By("verifying all recreated schedules have proper configuration")
+				Eventually(func() error {
+					err := k8sClient.List(ctx, veleroSchedules, client.InNamespace(veleroNamespace.Name))
+					if err != nil {
+						return err
+					}
+
+					if len(veleroSchedules.Items) != expectedScheduleCount {
+						return fmt.Errorf("expected %d schedules, got %d", expectedScheduleCount, len(veleroSchedules.Items))
+					}
+
+					// Verify all expected schedule names are recreated
+					recreatedScheduleNames := make([]string, len(veleroSchedules.Items))
+					for i, schedule := range veleroSchedules.Items {
+						recreatedScheduleNames[i] = schedule.Name
+
+						// Verify schedule configuration
+						if schedule.Spec.Schedule != backupSchedule {
+							return fmt.Errorf("schedule %s has wrong cron: expected %s, got %s",
+								schedule.Name, backupSchedule, schedule.Spec.Schedule)
+						}
+						// The validation schedule has a special TTL calculation, others use the default
+						if schedule.Name != veleroScheduleNames[ValidationSchedule] {
+							if schedule.Spec.Template.TTL.Duration != defaultVeleroTTL {
+								return fmt.Errorf("schedule %s has wrong TTL: expected %v, got %v",
+									schedule.Name, defaultVeleroTTL, schedule.Spec.Template.TTL.Duration)
+							}
+						}
+					}
+
+					// Check all expected names are present
+					for _, expectedName := range veleroScheduleNames {
+						found := false
+						for _, recreatedName := range recreatedScheduleNames {
+							if recreatedName == expectedName {
+								found = true
+								break
+							}
+						}
+						if !found {
+							return fmt.Errorf("expected schedule %s not found in recreated schedules", expectedName)
+						}
+					}
+
+					return nil
+				}, timeout*2, interval).Should(Succeed())
+
+				// Step 8: Verify BackupSchedule status is updated properly
+				By("verifying backup schedule status reflects successful recreation")
+				Eventually(func() (bool, error) {
+					err := k8sClient.Get(ctx, scheduleLookupKey, &createdSchedule)
+					if err != nil {
+						return false, err
+					}
+					// The schedule should not be in a failed state after successful recreation
+					return createdSchedule.Status.Phase != v1beta1.SchedulePhaseFailedValidation &&
+						createdSchedule.Status.Phase != "", nil
+				}, timeout, interval).Should(BeTrue())
+
+			})
+		})
 	})
 })
