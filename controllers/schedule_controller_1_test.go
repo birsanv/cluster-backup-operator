@@ -902,5 +902,186 @@ var _ = Describe("BackupSchedule controller", func() {
 
 			})
 		})
+
+		Context("when testing schedule spec updates", func() {
+			BeforeEach(func() {
+				// Create a BackupSchedule that will have Velero schedules created
+				rhacmBackupSchedule = *createBackupSchedule(backupScheduleName, veleroNamespace.Name).
+					schedule(backupSchedule).
+					veleroTTL(metav1.Duration{Duration: defaultVeleroTTL}).
+					object
+			})
+
+			// Test Case: Schedule Spec Update Logic
+			//
+			// This test validates the schedule spec update logic that runs when the cron
+			// schedule or TTL is changed on an existing BackupSchedule. This covers line 238
+			// in schedule_controller.go where the controller returns early after updating schedules.
+			It("should update velero schedules when BackupSchedule spec is changed", func() {
+				scheduleLookupKey := createLookupKey(backupScheduleName, veleroNamespace.Name)
+				createdSchedule := v1beta1.BackupSchedule{}
+
+				// Step 1: Create the BackupSchedule and wait for all Velero schedules to be created
+				By("creating backup schedule and waiting for all velero schedules")
+				Eventually(func() error {
+					return k8sClient.Get(ctx, scheduleLookupKey, &createdSchedule)
+				}, timeout, interval).Should(Succeed())
+
+				// Wait for all 5 Velero schedules to be created
+				veleroSchedules := &veleroapi.ScheduleList{}
+				expectedScheduleCount := len(veleroScheduleNames)
+				Eventually(func() (int, error) {
+					err := k8sClient.List(ctx, veleroSchedules, client.InNamespace(veleroNamespace.Name))
+					if err != nil {
+						return 0, err
+					}
+					return len(veleroSchedules.Items), nil
+				}, timeout, interval).Should(Equal(expectedScheduleCount))
+
+				// Step 2: Verify initial schedule configuration
+				By("verifying initial velero schedule configuration")
+				Expect(len(veleroSchedules.Items)).To(Equal(expectedScheduleCount))
+
+				// Check initial configuration values
+				for _, schedule := range veleroSchedules.Items {
+					Expect(schedule.Spec.Schedule).To(Equal(backupSchedule)) // Initial cron: "0 2 * * *"
+					// Only check TTL for non-validation schedules
+					if schedule.Name != veleroScheduleNames[ValidationSchedule] {
+						Expect(schedule.Spec.Template.TTL.Duration).To(Equal(defaultVeleroTTL)) // Initial TTL: 72h
+					}
+				}
+
+				// Step 3: Update the BackupSchedule spec with new cron schedule and TTL
+				By("updating backup schedule spec with new cron and TTL values")
+				newCronSchedule := "0 4 * * *" // Change from "0 2 * * *" to "0 4 * * *"
+				newTTL := time.Hour * 96       // Change from 72h to 96h
+
+				Eventually(func() error {
+					err := k8sClient.Get(ctx, scheduleLookupKey, &createdSchedule)
+					if err != nil {
+						return err
+					}
+					// Update both cron schedule and TTL
+					createdSchedule.Spec.VeleroSchedule = newCronSchedule
+					createdSchedule.Spec.VeleroTTL = metav1.Duration{Duration: newTTL}
+					return k8sClient.Update(ctx, &createdSchedule)
+				}, timeout, interval).Should(Succeed())
+
+				// Step 4: Verify the BackupSchedule spec was updated
+				By("verifying backup schedule spec was updated")
+				Eventually(func() (bool, error) {
+					err := k8sClient.Get(ctx, scheduleLookupKey, &createdSchedule)
+					if err != nil {
+						return false, err
+					}
+					cronUpdated := createdSchedule.Spec.VeleroSchedule == newCronSchedule
+					ttlUpdated := createdSchedule.Spec.VeleroTTL.Duration == newTTL
+					return cronUpdated && ttlUpdated, nil
+				}, timeout, interval).Should(BeTrue())
+
+				// Step 5: Wait for controller to detect spec changes and update Velero schedules
+				// This should trigger line 238: isVeleroSchedulesUpdateRequired returns updated=true
+				By("waiting for controller to detect spec changes and update velero schedules")
+				Eventually(func() (bool, error) {
+					err := k8sClient.List(ctx, veleroSchedules, client.InNamespace(veleroNamespace.Name))
+					if err != nil {
+						return false, err
+					}
+
+					// Check if all schedules have been updated with new values
+					allUpdated := true
+					for _, schedule := range veleroSchedules.Items {
+						// Check cron schedule update
+						if schedule.Spec.Schedule != newCronSchedule {
+							allUpdated = false
+							break
+						}
+						// Check TTL update (skip validation schedule as it has special TTL logic)
+						if schedule.Name != veleroScheduleNames[ValidationSchedule] {
+							if schedule.Spec.Template.TTL.Duration != newTTL {
+								allUpdated = false
+								break
+							}
+						}
+					}
+					return allUpdated, nil
+				}, timeout*3, interval).Should(BeTrue())
+
+				// Step 6: Verify all Velero schedules have been updated with new configuration
+				By("verifying all velero schedules have new configuration")
+				Eventually(func() error {
+					err := k8sClient.List(ctx, veleroSchedules, client.InNamespace(veleroNamespace.Name))
+					if err != nil {
+						return err
+					}
+
+					if len(veleroSchedules.Items) != expectedScheduleCount {
+						return fmt.Errorf("expected %d schedules, got %d", expectedScheduleCount, len(veleroSchedules.Items))
+					}
+
+					// Verify each schedule has the updated configuration
+					for _, schedule := range veleroSchedules.Items {
+						// Verify cron schedule update
+						if schedule.Spec.Schedule != newCronSchedule {
+							return fmt.Errorf("schedule %s has wrong cron: expected %s, got %s",
+								schedule.Name, newCronSchedule, schedule.Spec.Schedule)
+						}
+
+						// Verify TTL update (validation schedule has special TTL calculation)
+						if schedule.Name != veleroScheduleNames[ValidationSchedule] {
+							if schedule.Spec.Template.TTL.Duration != newTTL {
+								return fmt.Errorf("schedule %s has wrong TTL: expected %v, got %v",
+									schedule.Name, newTTL, schedule.Spec.Template.TTL.Duration)
+							}
+						}
+					}
+
+					return nil
+				}, timeout*2, interval).Should(Succeed())
+
+				// Step 7: Verify BackupSchedule status reflects successful update
+				By("verifying backup schedule status reflects successful update")
+				Eventually(func() (bool, error) {
+					err := k8sClient.Get(ctx, scheduleLookupKey, &createdSchedule)
+					if err != nil {
+						return false, err
+					}
+					// The schedule should not be in a failed state after successful update
+					return createdSchedule.Status.Phase != v1beta1.SchedulePhaseFailedValidation &&
+						createdSchedule.Status.Phase != "", nil
+				}, timeout, interval).Should(BeTrue())
+
+				// Step 8: Test updating just the cron schedule (without TTL change)
+				By("testing cron schedule update without TTL change")
+				anotherCronSchedule := "0 6 * * *" // Change to 6 AM
+
+				Eventually(func() error {
+					err := k8sClient.Get(ctx, scheduleLookupKey, &createdSchedule)
+					if err != nil {
+						return err
+					}
+					// Update only cron schedule, keep TTL the same
+					createdSchedule.Spec.VeleroSchedule = anotherCronSchedule
+					return k8sClient.Update(ctx, &createdSchedule)
+				}, timeout, interval).Should(Succeed())
+
+				// Verify the cron-only update is applied
+				Eventually(func() (bool, error) {
+					err := k8sClient.List(ctx, veleroSchedules, client.InNamespace(veleroNamespace.Name))
+					if err != nil {
+						return false, err
+					}
+
+					// Check if all schedules have the new cron schedule
+					for _, schedule := range veleroSchedules.Items {
+						if schedule.Spec.Schedule != anotherCronSchedule {
+							return false, nil
+						}
+					}
+					return true, nil
+				}, timeout*2, interval).Should(BeTrue())
+
+			})
+		})
 	})
 })
