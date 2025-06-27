@@ -38,6 +38,7 @@ import (
 	clusterv1 "open-cluster-management.io/api/cluster/v1"
 	workv1 "open-cluster-management.io/api/work/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -1139,6 +1140,299 @@ func Test_retrieveMSAImportSecrets(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := retrieveMSAImportSecrets(tt.args.secrets); len(got) != len(tt.args.returnSecrets) {
 				t.Errorf("getBackupTimestamp() = %v, want %v", got, tt.args.returnSecrets)
+			}
+		})
+	}
+}
+
+func Test_updateMSAResources(t *testing.T) {
+	// Set up test logger
+	log.SetLogger(zap.New(zap.UseDevMode(true)))
+	ctx := context.Background()
+
+	// Test namespace
+	namespace := "msa-test-ns"
+
+	// Create scheme
+	scheme1 := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme1); err != nil {
+		t.Fatalf("Error adding core apis to scheme: %s", err.Error())
+	}
+
+	// Create test secrets that should be processed by updateMSAResources
+	// Secret 1: MSA secret without backup label (should be processed)
+	msaSecret1 := &corev1.Secret{
+		ObjectMeta: v1.ObjectMeta{
+			Name:      "auto-import-account-test1",
+			Namespace: namespace,
+			Labels: map[string]string{
+				"authentication.open-cluster-management.io/is-managed-serviceaccount": "true",
+			},
+		},
+		Data: map[string][]byte{
+			"token": []byte("test-token-1"),
+		},
+	}
+
+	// Secret 2: MSA secret with existing backup label (should be skipped)
+	msaSecret2 := &corev1.Secret{
+		ObjectMeta: v1.ObjectMeta{
+			Name:      "auto-import-account-test2",
+			Namespace: namespace,
+			Labels: map[string]string{
+				"authentication.open-cluster-management.io/is-managed-serviceaccount": "true",
+				"cluster.open-cluster-management.io/backup":                           "msa",
+			},
+		},
+		Data: map[string][]byte{
+			"token": []byte("test-token-2"),
+		},
+	}
+
+	// Secret 3: MSA secret without backup label and no annotations (should be processed)
+	msaSecret3 := &corev1.Secret{
+		ObjectMeta: v1.ObjectMeta{
+			Name:      "auto-import-account-test3",
+			Namespace: namespace,
+			Labels: map[string]string{
+				"authentication.open-cluster-management.io/is-managed-serviceaccount": "true",
+			},
+		},
+		Data: map[string][]byte{
+			"token": []byte("test-token-3"),
+		},
+	}
+
+	// Secret 4: Non-MSA secret (should be ignored)
+	nonMsaSecret := &corev1.Secret{
+		ObjectMeta: v1.ObjectMeta{
+			Name:      "non-msa-secret",
+			Namespace: namespace,
+			Labels: map[string]string{
+				"app": "test",
+			},
+		},
+		Data: map[string][]byte{
+			"data": []byte("test-data"),
+		},
+	}
+
+	// Create fake client with the test secrets
+	k8sClient1 := fake.NewClientBuilder().WithScheme(scheme1).WithObjects(
+		msaSecret1, msaSecret2, msaSecret3, nonMsaSecret,
+	).Build()
+
+	// Create fake dynamic client with MSA resources that have status information
+	msaResource1 := &unstructured.Unstructured{}
+	msaResource1.SetUnstructuredContent(map[string]interface{}{
+		"apiVersion": "authentication.open-cluster-management.io/v1beta1",
+		"kind":       "ManagedServiceAccount",
+		"metadata": map[string]interface{}{
+			"name":      "auto-import-account-test1",
+			"namespace": namespace,
+		},
+		"spec": map[string]interface{}{
+			"rotation": map[string]interface{}{
+				"validity": "24h",
+				"enabled":  true,
+			},
+		},
+		"status": map[string]interface{}{
+			"expirationTimestamp": "2024-01-01T12:00:00Z",
+			"tokenSecretRef": map[string]interface{}{
+				"lastRefreshTimestamp": "2024-01-01T10:00:00Z",
+			},
+		},
+	})
+
+	msaResource3 := &unstructured.Unstructured{}
+	msaResource3.SetUnstructuredContent(map[string]interface{}{
+		"apiVersion": "authentication.open-cluster-management.io/v1beta1",
+		"kind":       "ManagedServiceAccount",
+		"metadata": map[string]interface{}{
+			"name":      "auto-import-account-test3",
+			"namespace": namespace,
+		},
+		"spec": map[string]interface{}{
+			"rotation": map[string]interface{}{
+				"validity": "48h",
+				"enabled":  true,
+			},
+		},
+		"status": map[string]interface{}{
+			"expirationTimestamp": "2024-01-02T12:00:00Z",
+			"tokenSecretRef": map[string]interface{}{
+				"lastRefreshTimestamp": "2024-01-02T10:00:00Z",
+			},
+		},
+	})
+
+	// MSA resource without status (to test edge case)
+	msaResourceNoStatus := &unstructured.Unstructured{}
+	msaResourceNoStatus.SetUnstructuredContent(map[string]interface{}{
+		"apiVersion": "authentication.open-cluster-management.io/v1beta1",
+		"kind":       "ManagedServiceAccount",
+		"metadata": map[string]interface{}{
+			"name":      "msa-no-status",
+			"namespace": namespace,
+		},
+		"spec": map[string]interface{}{
+			"rotation": map[string]interface{}{
+				"validity": "24h",
+				"enabled":  true,
+			},
+		},
+	})
+
+	dynClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(),
+		msaResource1, msaResource3, msaResourceNoStatus)
+
+	res := schema.GroupVersionResource{
+		Group:    "authentication.open-cluster-management.io",
+		Version:  "v1beta1",
+		Resource: "managedserviceaccounts",
+	}
+	resInterface := dynClient.Resource(res)
+
+	type args struct {
+		ctx context.Context
+		c   client.Client
+		dr  dynamic.NamespaceableResourceInterface
+	}
+	tests := []struct {
+		name                      string
+		args                      args
+		wantSecret1BackupLabel    bool
+		wantSecret1Annotations    bool
+		wantSecret2Unchanged      bool
+		wantSecret3BackupLabel    bool
+		wantSecret3Annotations    bool
+		wantNonMsaSecretUnchanged bool
+	}{
+		{
+			name: "updateMSAResources processes MSA secrets correctly",
+			args: args{
+				ctx: ctx,
+				c:   k8sClient1,
+				dr:  resInterface,
+			},
+			wantSecret1BackupLabel:    true,
+			wantSecret1Annotations:    true,
+			wantSecret2Unchanged:      true,
+			wantSecret3BackupLabel:    true,
+			wantSecret3Annotations:    true,
+			wantNonMsaSecretUnchanged: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Call the function under test
+			updateMSAResources(tt.args.ctx, tt.args.c, tt.args.dr)
+
+			// Verify Secret 1 was updated with backup label and annotations
+			if tt.wantSecret1BackupLabel {
+				updatedSecret1 := &corev1.Secret{}
+				err := k8sClient1.Get(ctx, types.NamespacedName{
+					Name:      "auto-import-account-test1",
+					Namespace: namespace,
+				}, updatedSecret1)
+				if err != nil {
+					t.Errorf("failed to get updated secret 1: %v", err)
+				}
+
+				// Check backup label was added
+				if updatedSecret1.Labels["cluster.open-cluster-management.io/backup"] != "msa" {
+					t.Errorf("expected backup label 'msa' on secret 1, got %v",
+						updatedSecret1.Labels["cluster.open-cluster-management.io/backup"])
+				}
+
+				// Check annotations were added from MSA status
+				if tt.wantSecret1Annotations {
+					annotations := updatedSecret1.GetAnnotations()
+					if annotations == nil {
+						t.Errorf("expected annotations on secret 1, got nil")
+					} else {
+						if annotations["expirationTimestamp"] != "2024-01-01T12:00:00Z" {
+							t.Errorf("expected expirationTimestamp annotation, got %v",
+								annotations["expirationTimestamp"])
+						}
+						if annotations["lastRefreshTimestamp"] != "2024-01-01T10:00:00Z" {
+							t.Errorf("expected lastRefreshTimestamp annotation, got %v",
+								annotations["lastRefreshTimestamp"])
+						}
+					}
+				}
+			}
+
+			// Verify Secret 2 was unchanged (already had backup label)
+			if tt.wantSecret2Unchanged {
+				unchangedSecret2 := &corev1.Secret{}
+				err := k8sClient1.Get(ctx, types.NamespacedName{
+					Name:      "auto-import-account-test2",
+					Namespace: namespace,
+				}, unchangedSecret2)
+				if err != nil {
+					t.Errorf("failed to get secret 2: %v", err)
+				}
+
+				// Should still have the backup label
+				if unchangedSecret2.Labels["cluster.open-cluster-management.io/backup"] != "msa" {
+					t.Errorf("secret 2 backup label should be unchanged")
+				}
+			}
+
+			// Verify Secret 3 was updated with backup label and annotations
+			if tt.wantSecret3BackupLabel {
+				updatedSecret3 := &corev1.Secret{}
+				err := k8sClient1.Get(ctx, types.NamespacedName{
+					Name:      "auto-import-account-test3",
+					Namespace: namespace,
+				}, updatedSecret3)
+				if err != nil {
+					t.Errorf("failed to get updated secret 3: %v", err)
+				}
+
+				// Check backup label was added
+				if updatedSecret3.Labels["cluster.open-cluster-management.io/backup"] != "msa" {
+					t.Errorf("expected backup label 'msa' on secret 3, got %v",
+						updatedSecret3.Labels["cluster.open-cluster-management.io/backup"])
+				}
+
+				// Check annotations were added from MSA status
+				if tt.wantSecret3Annotations {
+					annotations := updatedSecret3.GetAnnotations()
+					if annotations == nil {
+						t.Errorf("expected annotations on secret 3, got nil")
+					} else {
+						if annotations["expirationTimestamp"] != "2024-01-02T12:00:00Z" {
+							t.Errorf("expected expirationTimestamp annotation, got %v",
+								annotations["expirationTimestamp"])
+						}
+						if annotations["lastRefreshTimestamp"] != "2024-01-02T10:00:00Z" {
+							t.Errorf("expected lastRefreshTimestamp annotation, got %v",
+								annotations["lastRefreshTimestamp"])
+						}
+					}
+				}
+			}
+
+			// Verify non-MSA secret was unchanged
+			if tt.wantNonMsaSecretUnchanged {
+				unchangedNonMsa := &corev1.Secret{}
+				err := k8sClient1.Get(ctx, types.NamespacedName{
+					Name:      "non-msa-secret",
+					Namespace: namespace,
+				}, unchangedNonMsa)
+				if err != nil {
+					t.Errorf("failed to get non-MSA secret: %v", err)
+				}
+
+				// Should not have backup label
+				if unchangedNonMsa.Labels["cluster.open-cluster-management.io/backup"] != "" {
+					t.Errorf("non-MSA secret should not have backup label, got %v",
+						unchangedNonMsa.Labels["cluster.open-cluster-management.io/backup"])
+				}
 			}
 		})
 	}
