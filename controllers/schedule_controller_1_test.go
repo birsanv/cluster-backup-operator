@@ -336,6 +336,59 @@ var _ = Describe("BackupSchedule controller", func() {
 					return hasVeleroSchedules, nil
 				}, timeout, interval).Should(BeTrue())
 
+				// Step 6: Test active resource conflict by creating a Restore while BackupSchedule is active
+				By("creating a restore resource while backup schedule is active to trigger line 177")
+				skipBackup := "skip"
+				conflictingRestore := &v1beta1.Restore{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "conflicting-restore",
+						Namespace: veleroNamespace.Name,
+					},
+					Spec: v1beta1.RestoreSpec{
+						VeleroManagedClustersBackupName: &skipBackup,
+						VeleroCredentialsBackupName:     &skipBackup,
+						VeleroResourcesBackupName:       &skipBackup,
+					},
+				}
+				Expect(k8sClient.Create(ctx, conflictingRestore)).Should(Succeed())
+
+				// Step 7: Verify the restore is ignored due to active BackupSchedule (integration test)
+				By("verifying restore is ignored due to active backup schedule")
+				restoreLookupKey := types.NamespacedName{
+					Name:      "conflicting-restore",
+					Namespace: veleroNamespace.Name,
+				}
+				// The restore should remain in an initial state since it's being ignored
+				Eventually(func() (bool, error) {
+					createdRestore := &v1beta1.Restore{}
+					err := k8sClient.Get(ctx, restoreLookupKey, createdRestore)
+					if err != nil {
+						return false, err
+					}
+					// The restore should exist but not progress to a finished state
+					// since it's being ignored due to the active BackupSchedule
+					return createdRestore.Status.Phase == "", nil
+				}, timeout, interval).Should(BeTrue())
+
+				// Step 8: Verify the error message mentions the active BackupSchedule
+				By("verifying error message mentions active backup schedule")
+				Eventually(func() (string, error) {
+					createdRestore := &v1beta1.Restore{}
+					err := k8sClient.Get(ctx, restoreLookupKey, createdRestore)
+					if err != nil {
+						return "", err
+					}
+					return createdRestore.Status.LastMessage, nil
+				}, timeout, interval).Should(ContainSubstring("BackupSchedule resource"))
+				Eventually(func() (string, error) {
+					createdRestore := &v1beta1.Restore{}
+					err := k8sClient.Get(ctx, restoreLookupKey, createdRestore)
+					if err != nil {
+						return "", err
+					}
+					return createdRestore.Status.LastMessage, nil
+				}, timeout, interval).Should(ContainSubstring("currently active"))
+
 			})
 		})
 
