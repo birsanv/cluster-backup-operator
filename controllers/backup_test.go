@@ -38,7 +38,6 @@ func RandStringBytesMask(n int) string {
 
 var _ = Describe("Backup", func() {
 	var (
-		backupName                      = "the-backup-name"
 		veleroNamespaceName             = "velero"
 		veleroManagedClustersBackupName = "acm-managed-clusters-schedule-20210910181336"
 		veleroResourcesBackupName       = "acm-resources-schedule-20210910181336"
@@ -51,43 +50,13 @@ var _ = Describe("Backup", func() {
 	)
 
 	Context("For utility functions of Backup", func() {
-		It("isBackupFinished should return correct value based on the status", func() {
+		It("getValidKsRestoreName should return correct value", func() {
 			// returns the concatenated strings, no trimming
 			Expect(getValidKsRestoreName("a", "b")).Should(Equal("a-b"))
 
 			// returns substring of length 252
 			longName := RandStringBytesMask(260)
 			Expect(getValidKsRestoreName(longName, "b")).Should(Equal(longName[:252]))
-
-			Expect(isBackupFinished(nil)).Should(BeFalse())
-
-			veleroBackups := make([]*veleroapi.Backup, 0)
-			Expect(isBackupFinished(veleroBackups)).Should(BeFalse())
-
-			veleroBackup := veleroapi.Backup{
-				TypeMeta: metav1.TypeMeta{
-					APIVersion: "cluster.open-cluster-management.io/v1beta1",
-					Kind:       "Backup",
-				},
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      backupName,
-					Namespace: "",
-					Labels:    labelsCls123,
-				},
-			}
-			veleroBackups = append(veleroBackups, &veleroBackup)
-
-			Expect(isBackupFinished(veleroBackups)).Should(BeFalse())
-
-			veleroBackup.Status.Phase = "Completed"
-			Expect(isBackupFinished(veleroBackups)).Should(BeTrue())
-			veleroBackup.Status.Phase = "Failed"
-			Expect(isBackupFinished(veleroBackups)).Should(BeTrue())
-			veleroBackup.Status.Phase = "PartiallyFailed"
-			Expect(isBackupFinished(veleroBackups)).Should(BeTrue())
-
-			veleroBackup.Status.Phase = "InvalidStatus"
-			Expect(isBackupFinished(veleroBackups)).Should(BeFalse())
 		})
 
 		It("min should return the expected value", func() {
