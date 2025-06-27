@@ -1302,6 +1302,101 @@ var _ = Describe("Basic Restore controller", func() {
 			})
 		})
 
+		Context("when creating restore with invalid cleanup option", func() {
+			BeforeEach(func() {
+				// Create a unique namespace for this test
+				uniqueSuffix := fmt.Sprintf("%d-%d", GinkgoRandomSeed(), time.Now().UnixNano())
+				veleroNamespace = createNamespace(fmt.Sprintf("velero-invalid-cleanup-%s", uniqueSuffix))
+
+				// Create backup storage location
+				backupStorageLocation = createStorageLocation("default", veleroNamespace.Name).
+					setOwner().
+					phase(veleroapi.BackupStorageLocationPhaseAvailable).object
+
+				// Set restore name
+				restoreName = "invalid-cleanup-restore"
+
+				// Create restore with invalid cleanup option to trigger line 195
+				rhacmRestore = v1beta1.Restore{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      restoreName,
+						Namespace: veleroNamespace.Name,
+					},
+					Spec: v1beta1.RestoreSpec{
+						VeleroManagedClustersBackupName: &skipRestore,
+						VeleroCredentialsBackupName:     &skipRestore,
+						VeleroResourcesBackupName:       &skipRestore,
+						CleanupBeforeRestore:            "invalid-cleanup-type", // Invalid cleanup type
+					},
+				}
+
+				// No Velero backups needed for this test since we're testing validation failure
+				veleroBackups = []veleroapi.Backup{}
+				managedClusterNamespaces = []corev1.Namespace{}
+			})
+
+			// Test Case: Invalid Cleanup Option Validation (restore controller)
+			//
+			// This test validates that the controller properly validates cleanup options
+			// and sets appropriate error status when invalid cleanup values are provided.
+			// This specifically covers line 195 in restore_controller.go.
+			It("should set error status for invalid cleanup option", func() {
+				restoreLookupKey := types.NamespacedName{
+					Name:      restoreName,
+					Namespace: veleroNamespace.Name,
+				}
+				createdRestore := v1beta1.Restore{}
+
+				// Step 1: Wait for ACM Restore to be created
+				By("waiting for ACM restore to be created")
+				Eventually(func() error {
+					return k8sClient.Get(ctx, restoreLookupKey, &createdRestore)
+				}, timeout, interval).Should(Succeed())
+
+				// Step 2: Wait for controller to validate cleanup option and set error status
+				// Note: Due to potential status update conflicts, we'll check that the validation
+				// occurred rather than expecting a specific final status
+				By("waiting for controller to detect invalid cleanup option (restore controller)")
+				Eventually(func() (bool, error) {
+					err := k8sClient.Get(ctx, restoreLookupKey, &createdRestore)
+					if err != nil {
+						return false, err
+					}
+					// The restore should either be in error state or have a meaningful status
+					// The key is that the validation logic was triggered (line 195 executed)
+					return createdRestore.Status.Phase != "", nil
+				}, timeout, interval).Should(BeTrue())
+
+				// Step 3: Verify error message contains cleanup validation details
+				By("verifying error message contains invalid cleanup option details")
+				Eventually(func() (string, error) {
+					err := k8sClient.Get(ctx, restoreLookupKey, &createdRestore)
+					if err != nil {
+						return "", err
+					}
+					return createdRestore.Status.LastMessage, nil
+				}, timeout, interval).Should(ContainSubstring("invalid CleanupBeforeRestore value"))
+				Eventually(func() (string, error) {
+					err := k8sClient.Get(ctx, restoreLookupKey, &createdRestore)
+					if err != nil {
+						return "", err
+					}
+					return createdRestore.Status.LastMessage, nil
+				}, timeout, interval).Should(ContainSubstring("invalid-cleanup-type"))
+
+				// Step 4: Verify no Velero restores are created due to validation failure
+				By("verifying no velero restores are created for invalid cleanup option")
+				veleroRestores := &veleroapi.RestoreList{}
+				Consistently(func() (int, error) {
+					err := k8sClient.List(ctx, veleroRestores, client.InNamespace(veleroNamespace.Name))
+					if err != nil {
+						return -1, err
+					}
+					return len(veleroRestores.Items), nil
+				}, time.Second*2, interval).Should(Equal(0))
+			})
+		})
+
 	}) // End of error handling and validation group
 })
 
