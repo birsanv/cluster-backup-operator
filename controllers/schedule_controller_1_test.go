@@ -1083,5 +1083,163 @@ var _ = Describe("BackupSchedule controller", func() {
 
 			})
 		})
+
+		Context("when creating backup schedule with managed service account option", func() {
+			BeforeEach(func() {
+				// Create a BackupSchedule with MSA enabled
+				rhacmBackupSchedule = *createBackupSchedule(backupScheduleName, veleroNamespace.Name).
+					schedule(backupSchedule).
+					veleroTTL(metav1.Duration{Duration: defaultVeleroTTL}).
+					useManagedServiceAccount(true).
+					object
+			})
+
+			// Test Case: MSA Integration and updateMSAResources Coverage
+			//
+			// This test validates that the controller properly handles BackupSchedules with
+			// useManagedServiceAccount enabled, which triggers the updateMSAResources function
+			// during backup preparation. This provides end-to-end coverage of the MSA workflow.
+			It("should process managed service accounts and create velero schedules", func() {
+				scheduleLookupKey := createLookupKey(backupScheduleName, veleroNamespace.Name)
+				createdSchedule := v1beta1.BackupSchedule{}
+
+				// Step 1: Create MSA secrets that should be processed
+				By("creating MSA secrets that should be processed by updateMSAResources")
+
+				// Create test MSA secrets with proper labels and names
+				msaSecret1 := &corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "auto-import-account-test-cluster-1",
+						Namespace: "test-cluster-1",
+						Labels: map[string]string{
+							"authentication.open-cluster-management.io/is-managed-serviceaccount": "true",
+						},
+					},
+					Data: map[string][]byte{
+						"token": []byte("test-token-1"),
+					},
+				}
+
+				msaSecret2 := &corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "auto-import-account-test-cluster-2",
+						Namespace: "test-cluster-2",
+						Labels: map[string]string{
+							"authentication.open-cluster-management.io/is-managed-serviceaccount": "true",
+						},
+					},
+					Data: map[string][]byte{
+						"token": []byte("test-token-2"),
+					},
+				}
+
+				// Create the namespaces first
+				testNs1 := createNamespace("test-cluster-1")
+				testNs2 := createNamespace("test-cluster-2")
+				Expect(k8sClient.Create(ctx, testNs1)).Should(Succeed())
+				Expect(k8sClient.Create(ctx, testNs2)).Should(Succeed())
+
+				// Create the MSA secrets
+				Expect(k8sClient.Create(ctx, msaSecret1)).Should(Succeed())
+				Expect(k8sClient.Create(ctx, msaSecret2)).Should(Succeed())
+
+				// Step 2: Verify BackupSchedule is created with MSA option
+				By("waiting for backup schedule with MSA option to be created")
+				Eventually(func() error {
+					return k8sClient.Get(ctx, scheduleLookupKey, &createdSchedule)
+				}, timeout, interval).Should(Succeed())
+
+				// Verify MSA option is set
+				Expect(createdSchedule.Spec.UseManagedServiceAccount).Should(BeTrue())
+
+				// Step 3: Wait for controller to process the BackupSchedule and MSA secrets
+				By("waiting for controller to process backup schedule with MSA")
+				Eventually(func() (string, error) {
+					err := k8sClient.Get(ctx, scheduleLookupKey, &createdSchedule)
+					if err != nil {
+						return "", err
+					}
+					return string(createdSchedule.Status.Phase), nil
+				}, timeout*2, interval).Should(SatisfyAny(
+					Equal(string(v1beta1.SchedulePhaseEnabled)),
+					Equal(string(v1beta1.SchedulePhaseNew)),
+					Not(BeEmpty()),
+				))
+
+				// Step 4: Wait for Velero schedules to be created (this triggers MSA processing)
+				By("waiting for velero schedules to be created which triggers MSA processing")
+				veleroSchedules := &veleroapi.ScheduleList{}
+				expectedScheduleCount := len(veleroScheduleNames)
+				Eventually(func() (int, error) {
+					err := k8sClient.List(ctx, veleroSchedules, client.InNamespace(veleroNamespace.Name))
+					if err != nil {
+						return 0, err
+					}
+					return len(veleroSchedules.Items), nil
+				}, timeout*2, interval).Should(Equal(expectedScheduleCount))
+
+				// Step 5: Verify MSA secrets were processed (should have backup labels)
+				By("verifying MSA secrets were processed and have backup labels")
+				Eventually(func() (bool, error) {
+					// Check first MSA secret
+					secret1 := &corev1.Secret{}
+					err := k8sClient.Get(ctx, types.NamespacedName{
+						Name:      "auto-import-account-test-cluster-1",
+						Namespace: "test-cluster-1",
+					}, secret1)
+					if err != nil {
+						return false, err
+					}
+
+					// Check if backup label was added
+					if secret1.Labels["cluster.open-cluster-management.io/backup"] != "msa" {
+						return false, nil
+					}
+
+					// Check second MSA secret
+					secret2 := &corev1.Secret{}
+					err = k8sClient.Get(ctx, types.NamespacedName{
+						Name:      "auto-import-account-test-cluster-2",
+						Namespace: "test-cluster-2",
+					}, secret2)
+					if err != nil {
+						return false, err
+					}
+
+					// Check if backup label was added
+					return secret2.Labels["cluster.open-cluster-management.io/backup"] == "msa", nil
+				}, timeout*3, interval).Should(BeTrue())
+
+				// Step 6: Verify Velero schedules have correct configuration
+				By("verifying velero schedules have proper MSA configuration")
+				Expect(len(veleroSchedules.Items)).To(Equal(expectedScheduleCount))
+
+				// Check configuration of schedules
+				for _, schedule := range veleroSchedules.Items {
+					Expect(schedule.Spec.Schedule).Should(Equal(backupSchedule))
+					if schedule.Name != veleroScheduleNames[ValidationSchedule] {
+						Expect(schedule.Spec.Template.TTL).Should(Equal(metav1.Duration{Duration: defaultVeleroTTL}))
+					}
+				}
+
+				// Step 7: Verify BackupSchedule status reflects successful MSA processing
+				By("verifying backup schedule status reflects successful MSA processing")
+				Eventually(func() (bool, error) {
+					err := k8sClient.Get(ctx, scheduleLookupKey, &createdSchedule)
+					if err != nil {
+						return false, err
+					}
+					// Check if status has been updated with Velero schedule info
+					hasVeleroSchedules := createdSchedule.Status.VeleroScheduleResources != nil
+					return hasVeleroSchedules, nil
+				}, timeout, interval).Should(BeTrue())
+
+				// Cleanup test namespaces
+				var zero int64 = 0
+				Expect(k8sClient.Delete(ctx, testNs1, &client.DeleteOptions{GracePeriodSeconds: &zero})).Should(Succeed())
+				Expect(k8sClient.Delete(ctx, testNs2, &client.DeleteOptions{GracePeriodSeconds: &zero})).Should(Succeed())
+			})
+		})
 	})
+
 })
