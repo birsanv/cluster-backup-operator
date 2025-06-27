@@ -38,8 +38,10 @@ import (
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -2323,4 +2325,184 @@ func Test_addOrRemoveResourcesFinalizer(t *testing.T) {
 		t.Fatalf("Error stopping testenv: %s", err.Error())
 	}
 
+}
+
+// Test_mapFuncTriggerFinalizers tests the mapFuncTriggerFinalizers function
+// which is used in the controller's watch setup to handle InternalHubComponent deletions
+func Test_mapFuncTriggerFinalizers(t *testing.T) {
+	ctx := context.Background()
+
+	// Test case 1: Non cluster-backup resource should return empty requests
+	t.Run("non cluster-backup resource", func(t *testing.T) {
+		mockObj := &unstructured.Unstructured{}
+		mockObj.SetAPIVersion("operator.open-cluster-management.io/v1")
+		mockObj.SetKind("InternalHubComponent")
+		mockObj.SetName("other-component")
+		mockObj.SetNamespace("test-namespace")
+
+		// Use a nil client since we expect early return
+		requests := mapFuncTriggerFinalizers(ctx, nil, mockObj)
+
+		if len(requests) != 0 {
+			t.Errorf("Expected empty requests for non cluster-backup resource, got %d", len(requests))
+		}
+	})
+
+	// Test case 2: cluster-backup resource without deletion timestamp should return empty requests
+	t.Run("cluster-backup without deletion timestamp", func(t *testing.T) {
+		mockObj := &unstructured.Unstructured{}
+		mockObj.SetAPIVersion("operator.open-cluster-management.io/v1")
+		mockObj.SetKind("InternalHubComponent")
+		mockObj.SetName("cluster-backup")
+		mockObj.SetNamespace("test-namespace")
+		// No deletion timestamp set
+
+		// Use a nil client since we expect early return
+		requests := mapFuncTriggerFinalizers(ctx, nil, mockObj)
+
+		if len(requests) != 0 {
+			t.Errorf("Expected empty requests for cluster-backup without deletion timestamp, got %d", len(requests))
+		}
+	})
+
+	// Test case 3: cluster-backup with deletion timestamp but client error should return empty requests
+	t.Run("cluster-backup with deletion timestamp and client error", func(t *testing.T) {
+		// Create a fake client with no scheme to cause List() to fail
+		fakeClient := fake.NewClientBuilder().Build()
+
+		mockObj := &unstructured.Unstructured{}
+		mockObj.SetAPIVersion("operator.open-cluster-management.io/v1")
+		mockObj.SetKind("InternalHubComponent")
+		mockObj.SetName("cluster-backup")
+		mockObj.SetNamespace("test-namespace")
+		// Set deletion timestamp to simulate deletion
+		now := metav1.Now()
+		mockObj.SetDeletionTimestamp(&now)
+
+		// Use a client without the proper scheme to cause List() to fail
+		requests := mapFuncTriggerFinalizers(ctx, fakeClient, mockObj)
+
+		if len(requests) != 0 {
+			t.Errorf("Expected empty requests on client error, got %d", len(requests))
+		}
+	})
+
+	// Test case 4: cluster-backup with deletion timestamp and working client
+	t.Run("cluster-backup with deletion timestamp and working client", func(t *testing.T) {
+		// Create a fake client with some test restore resources
+		scheme := runtime.NewScheme()
+		v1beta1.AddToScheme(scheme)
+
+		restore1 := &v1beta1.Restore{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-restore-1",
+				Namespace: "test-ns-1",
+			},
+		}
+		restore2 := &v1beta1.Restore{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-restore-2",
+				Namespace: "test-ns-2",
+			},
+		}
+
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(restore1, restore2).
+			Build()
+
+		mockObj := &unstructured.Unstructured{}
+		mockObj.SetAPIVersion("operator.open-cluster-management.io/v1")
+		mockObj.SetKind("InternalHubComponent")
+		mockObj.SetName("cluster-backup")
+		mockObj.SetNamespace("test-namespace")
+		// Set deletion timestamp to simulate deletion
+		now := metav1.Now()
+		mockObj.SetDeletionTimestamp(&now)
+
+		requests := mapFuncTriggerFinalizers(ctx, fakeClient, mockObj)
+
+		if len(requests) != 2 {
+			t.Errorf("Expected 2 reconcile requests, got %d", len(requests))
+		}
+
+		// Check that we got requests for both restore resources
+		requestNames := make([]string, len(requests))
+		for i, req := range requests {
+			requestNames[i] = req.Name
+		}
+
+		expectedNames := []string{"test-restore-1", "test-restore-2"}
+		for _, expected := range expectedNames {
+			found := false
+			for _, actual := range requestNames {
+				if actual == expected {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("Expected to find request for %s, but didn't", expected)
+			}
+		}
+	})
+}
+
+// Test_processFinalizersPredicate tests the processFinalizersPredicate function
+// which returns a predicate used to filter events in the controller's watch setup
+func Test_processFinalizersPredicate(t *testing.T) {
+	predicate := processFinalizersPredicate()
+
+	// Test case 1: Create events should return false
+	t.Run("create event should return false", func(t *testing.T) {
+		createEvent := event.CreateEvent{
+			Object: &unstructured.Unstructured{},
+		}
+
+		result := predicate.Create(createEvent)
+
+		if result != false {
+			t.Errorf("Expected false for Create event, got %v", result)
+		}
+	})
+
+	// Test case 2: Delete events should return true
+	t.Run("delete event should return true", func(t *testing.T) {
+		deleteEvent := event.DeleteEvent{
+			Object: &unstructured.Unstructured{},
+		}
+
+		result := predicate.Delete(deleteEvent)
+
+		if result != true {
+			t.Errorf("Expected true for Delete event, got %v", result)
+		}
+	})
+
+	// Test case 3: Update events should return true
+	t.Run("update event should return true", func(t *testing.T) {
+		updateEvent := event.UpdateEvent{
+			ObjectOld: &unstructured.Unstructured{},
+			ObjectNew: &unstructured.Unstructured{},
+		}
+
+		result := predicate.Update(updateEvent)
+
+		if result != true {
+			t.Errorf("Expected true for Update event, got %v", result)
+		}
+	})
+
+	// Test case 4: Generic events should return false
+	t.Run("generic event should return false", func(t *testing.T) {
+		genericEvent := event.GenericEvent{
+			Object: &unstructured.Unstructured{},
+		}
+
+		result := predicate.Generic(genericEvent)
+
+		if result != false {
+			t.Errorf("Expected false for Generic event, got %v", result)
+		}
+	})
 }
