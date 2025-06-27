@@ -157,6 +157,136 @@ var _ = Describe("Backup", func() {
 // Test_cleanupExpiredValidationBackups tests the cleanupExpiredValidationBackups function
 // which is responsible for cleaning up expired validation backups that Velero doesn't
 // automatically delete when they are in FailedValidation status or storage location issues.
+// createExpiredValidationBackups creates test backups for expired validation scenario
+//
+//nolint:funlen
+func createExpiredValidationBackups() []veleroapi.Backup {
+	now := time.Now()
+	oneHourAgo := metav1.NewTime(now.Add(-1 * time.Hour))
+	oneHourFromNow := metav1.NewTime(now.Add(1 * time.Hour))
+
+	return []veleroapi.Backup{
+		// Expired validation backup - should be deleted
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "expired-validation-backup-1",
+				Namespace: "velero-ns",
+				Labels: map[string]string{
+					BackupVeleroLabel: veleroScheduleNames[ValidationSchedule],
+				},
+			},
+			Status: veleroapi.BackupStatus{
+				Phase:      veleroapi.BackupPhaseFailedValidation,
+				Expiration: &oneHourAgo, // Expired 1 hour ago
+			},
+		},
+		// Another expired validation backup - should be deleted
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "expired-validation-backup-2",
+				Namespace: "velero-ns",
+				Labels: map[string]string{
+					BackupVeleroLabel: veleroScheduleNames[ValidationSchedule],
+				},
+			},
+			Status: veleroapi.BackupStatus{
+				Phase:      veleroapi.BackupPhaseCompleted,
+				Expiration: &oneHourAgo, // Expired 1 hour ago
+			},
+		},
+		// Non-expired validation backup - should NOT be deleted
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "valid-validation-backup",
+				Namespace: "velero-ns",
+				Labels: map[string]string{
+					BackupVeleroLabel: veleroScheduleNames[ValidationSchedule],
+				},
+			},
+			Status: veleroapi.BackupStatus{
+				Phase:      veleroapi.BackupPhaseCompleted,
+				Expiration: &oneHourFromNow, // Expires in 1 hour
+			},
+		},
+		// Validation backup with no expiration - should NOT be deleted
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "no-expiration-validation-backup",
+				Namespace: "velero-ns",
+				Labels: map[string]string{
+					BackupVeleroLabel: veleroScheduleNames[ValidationSchedule],
+				},
+			},
+			Status: veleroapi.BackupStatus{
+				Phase: veleroapi.BackupPhaseCompleted,
+				// No expiration set
+			},
+		},
+		// Non-validation backup (different label) - should NOT be deleted even if expired
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "expired-non-validation-backup",
+				Namespace: "velero-ns",
+				Labels: map[string]string{
+					BackupVeleroLabel: "some-other-schedule",
+				},
+			},
+			Status: veleroapi.BackupStatus{
+				Phase:      veleroapi.BackupPhaseCompleted,
+				Expiration: &oneHourAgo, // Expired but not validation backup
+			},
+		},
+	}
+}
+
+// createNonValidationBackups creates test backups with no validation backups
+func createNonValidationBackups() []veleroapi.Backup {
+	now := time.Now()
+	oneHourAgo := metav1.NewTime(now.Add(-1 * time.Hour))
+
+	return []veleroapi.Backup{
+		// Non-validation backup
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "non-validation-backup",
+				Namespace: "velero-ns",
+				Labels: map[string]string{
+					BackupVeleroLabel: "some-other-schedule",
+				},
+			},
+			Status: veleroapi.BackupStatus{
+				Phase:      veleroapi.BackupPhaseCompleted,
+				Expiration: &oneHourAgo,
+			},
+		},
+	}
+}
+
+// verifyDeletedBackups verifies that only expected backups were deleted
+func verifyDeletedBackups(t *testing.T, deletedBackups map[string]bool, allBackups []veleroapi.Backup) {
+	for backupName := range deletedBackups {
+		found := false
+		for _, backup := range allBackups {
+			if backup.Name == backupName {
+				found = true
+				// Should be a validation backup
+				if backup.Labels[BackupVeleroLabel] != veleroScheduleNames[ValidationSchedule] {
+					t.Errorf("Non-validation backup %s was deleted", backupName)
+				}
+				// Should be expired
+				if backup.Status.Expiration == nil || !time.Now().After(backup.Status.Expiration.Time) {
+					t.Errorf("Non-expired backup %s was deleted", backupName)
+				}
+				break
+			}
+		}
+		if !found {
+			t.Errorf("Unknown backup %s was deleted", backupName)
+		}
+	}
+}
+
+//nolint:funlen
 func Test_cleanupExpiredValidationBackups(t *testing.T) {
 	tests := []struct {
 		name                   string
@@ -165,111 +295,14 @@ func Test_cleanupExpiredValidationBackups(t *testing.T) {
 		description            string
 	}{
 		{
-			name: "cleanupExpiredValidationBackups processes expired validation backups correctly",
-			setupBackups: func() []veleroapi.Backup {
-				now := time.Now()
-				oneHourAgo := metav1.NewTime(now.Add(-1 * time.Hour))
-				oneHourFromNow := metav1.NewTime(now.Add(1 * time.Hour))
-
-				return []veleroapi.Backup{
-					// Expired validation backup - should be deleted
-					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "expired-validation-backup-1",
-							Namespace: "velero-ns",
-							Labels: map[string]string{
-								BackupVeleroLabel: veleroScheduleNames[ValidationSchedule],
-							},
-						},
-						Status: veleroapi.BackupStatus{
-							Phase:      veleroapi.BackupPhaseFailedValidation,
-							Expiration: &oneHourAgo, // Expired 1 hour ago
-						},
-					},
-					// Another expired validation backup - should be deleted
-					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "expired-validation-backup-2",
-							Namespace: "velero-ns",
-							Labels: map[string]string{
-								BackupVeleroLabel: veleroScheduleNames[ValidationSchedule],
-							},
-						},
-						Status: veleroapi.BackupStatus{
-							Phase:      veleroapi.BackupPhaseCompleted,
-							Expiration: &oneHourAgo, // Expired 1 hour ago
-						},
-					},
-					// Non-expired validation backup - should NOT be deleted
-					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "valid-validation-backup",
-							Namespace: "velero-ns",
-							Labels: map[string]string{
-								BackupVeleroLabel: veleroScheduleNames[ValidationSchedule],
-							},
-						},
-						Status: veleroapi.BackupStatus{
-							Phase:      veleroapi.BackupPhaseCompleted,
-							Expiration: &oneHourFromNow, // Expires in 1 hour
-						},
-					},
-					// Validation backup with no expiration - should NOT be deleted
-					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "no-expiration-validation-backup",
-							Namespace: "velero-ns",
-							Labels: map[string]string{
-								BackupVeleroLabel: veleroScheduleNames[ValidationSchedule],
-							},
-						},
-						Status: veleroapi.BackupStatus{
-							Phase: veleroapi.BackupPhaseCompleted,
-							// No expiration set
-						},
-					},
-					// Non-validation backup (different label) - should NOT be deleted even if expired
-					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "expired-non-validation-backup",
-							Namespace: "velero-ns",
-							Labels: map[string]string{
-								BackupVeleroLabel: "some-other-schedule",
-							},
-						},
-						Status: veleroapi.BackupStatus{
-							Phase:      veleroapi.BackupPhaseCompleted,
-							Expiration: &oneHourAgo, // Expired but not validation backup
-						},
-					},
-				}
-			},
+			name:                   "cleanupExpiredValidationBackups processes expired validation backups correctly",
+			setupBackups:           createExpiredValidationBackups,
 			expectedDeletedBackups: 2, // Only the 2 expired validation backups should be deleted
 			description:            "Should delete only expired validation backups and leave others untouched",
 		},
 		{
-			name: "cleanupExpiredValidationBackups handles no validation backups",
-			setupBackups: func() []veleroapi.Backup {
-				now := time.Now()
-				oneHourAgo := metav1.NewTime(now.Add(-1 * time.Hour))
-
-				return []veleroapi.Backup{
-					// Non-validation backup
-					{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "non-validation-backup",
-							Namespace: "velero-ns",
-							Labels: map[string]string{
-								BackupVeleroLabel: "some-other-schedule",
-							},
-						},
-						Status: veleroapi.BackupStatus{
-							Phase:      veleroapi.BackupPhaseCompleted,
-							Expiration: &oneHourAgo,
-						},
-					},
-				}
-			},
+			name:                   "cleanupExpiredValidationBackups handles no validation backups",
+			setupBackups:           createNonValidationBackups,
 			expectedDeletedBackups: 0, // No validation backups to delete
 			description:            "Should handle case where no validation backups exist",
 		},
@@ -323,26 +356,7 @@ func Test_cleanupExpiredValidationBackups(t *testing.T) {
 			}
 
 			// Verify that only expired validation backups were deleted
-			for backupName := range deletedBackups {
-				found := false
-				for _, backup := range backups {
-					if backup.Name == backupName {
-						found = true
-						// Should be a validation backup
-						if backup.Labels[BackupVeleroLabel] != veleroScheduleNames[ValidationSchedule] {
-							t.Errorf("Non-validation backup %s was deleted", backupName)
-						}
-						// Should be expired
-						if backup.Status.Expiration == nil || !time.Now().After(backup.Status.Expiration.Time) {
-							t.Errorf("Non-expired backup %s was deleted", backupName)
-						}
-						break
-					}
-				}
-				if !found {
-					t.Errorf("Unknown backup %s was deleted", backupName)
-				}
-			}
+			verifyDeletedBackups(t, deletedBackups, backups)
 
 			t.Logf("Test '%s': %s - Successfully deleted %d expired validation backups",
 				tt.name, tt.description, actualDeleted)

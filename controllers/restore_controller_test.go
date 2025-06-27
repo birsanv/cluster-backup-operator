@@ -1609,7 +1609,7 @@ var _ = Describe("Finalizer Cleanup Tests", func() {
 			// Ensure cleanup happens
 			defer func() {
 				var zero int64 = 0
-				k8sClient.Delete(ctx, testNS, &client.DeleteOptions{GracePeriodSeconds: &zero})
+				_ = k8sClient.Delete(ctx, testNS, &client.DeleteOptions{GracePeriodSeconds: &zero})
 			}()
 
 			// Create backup storage location

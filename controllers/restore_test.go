@@ -2391,7 +2391,7 @@ func Test_mapFuncTriggerFinalizers(t *testing.T) {
 	t.Run("cluster-backup with deletion timestamp and working client", func(t *testing.T) {
 		// Create a fake client with some test restore resources
 		scheme := runtime.NewScheme()
-		v1beta1.AddToScheme(scheme)
+		_ = v1beta1.AddToScheme(scheme)
 
 		restore1 := &v1beta1.Restore{
 			ObjectMeta: metav1.ObjectMeta{
