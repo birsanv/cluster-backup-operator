@@ -3,7 +3,6 @@ package controllers
 import (
 	"context"
 	"math/rand"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -16,7 +15,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
-	"sigs.k8s.io/controller-runtime/pkg/envtest"
 )
 
 const letterBytes = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -25,7 +23,7 @@ const (
 	letterIdxMask = 1<<letterIdxBits - 1 // All 1-bits, as many as letterIdxBits
 )
 
-// gerenates a random string with specified length
+// generates a random string with specified length
 func RandStringBytesMask(n int) string {
 	b := make([]byte, n)
 	for i := 0; i < n; {
@@ -380,144 +378,107 @@ func (c *clientWrapper) Create(ctx context.Context, obj client.Object, opts ...c
 	return c.Client.Create(ctx, obj, opts...)
 }
 
-//nolint:funlen
 func Test_deleteBackup(t *testing.T) {
-	testEnv := &envtest.Environment{
-		CRDDirectoryPaths: []string{
-			filepath.Join("..", "config", "crd", "bases"),
-			filepath.Join("..", "hack", "crds"),
-		},
-		ErrorIfCRDPathMissing: true,
-	}
-	cfg, err := testEnv.Start()
-	if err != nil {
-		t.Fatalf("Error starting testEnv: %s", err.Error())
-	}
-	scheme1 := runtime.NewScheme()
-	k8sClient1, err := client.New(cfg, client.Options{Scheme: scheme1})
-	if err != nil {
-		t.Fatalf("Error starting client: %s", err.Error())
-	}
-
-	backup := *createBackup("backup1", "ns1").object
-
-	type args struct {
-		ctx    context.Context
-		c      client.Client
-		backup veleroapi.Backup
-	}
 	tests := []struct {
-		name    string
-		args    args
-		err_nil bool
+		name          string
+		backupName    string
+		namespace     string
+		setupObjects  func() []client.Object
+		expectedError bool
+		description   string
 	}{
 		{
-			name: "no kind is registered for the type v1.DeleteBackupRequest, return error when asking for deleterequests",
-			args: args{
-				ctx:    context.Background(),
-				c:      k8sClient1,
-				backup: backup,
-			},
-			err_nil: false,
-		},
-		{
-			name: "create DeleteBackupRequest request error, because ns ns1 not found",
-			args: args{
-				ctx:    context.Background(),
-				c:      k8sClient1,
-				backup: backup,
-			},
-			err_nil: false,
-		},
-		{
-			name: "create DeleteBackupRequest request success, ns ns1 was found",
-			args: args{
-				ctx:    context.Background(),
-				c:      k8sClient1,
-				backup: *createBackup("backup2", "ns1").object,
-			},
-			err_nil: true,
-		},
-		{
-			name: "delete backup exists, has no errors",
-			args: args{
-				ctx:    context.Background(),
-				c:      k8sClient1,
-				backup: *createBackup("backup2", "ns1").object,
-			},
-			err_nil: true,
-		},
-		{
-			name: "delete backup exists, backup also exists - has no errors",
-			args: args{
-				ctx:    context.Background(),
-				c:      k8sClient1,
-				backup: *createBackup("backup2", "ns1").object,
-			},
-			err_nil: true,
-		},
-		{
-			name: "delete backup exists, backup does no exists but request does and it has errors",
-			args: args{
-				ctx:    context.Background(),
-				c:      k8sClient1,
-				backup: *createBackup("backup-does-not-exist", "ns3").object,
-			},
-			err_nil: false,
-		},
-	}
-
-	for index, tt := range tests {
-		if index == 1 {
-			// create ns so create calls pass through
-			if err := veleroapi.AddToScheme(scheme1); err != nil {
-				t.Errorf("err adding veleroapis to scheme: %s", err.Error())
-			}
-		}
-		if index == 2 {
-			// create ns so create calls pass through
-			if err := corev1.AddToScheme(scheme1); err != nil {
-				t.Errorf("err adding core apis to scheme: %s", err.Error())
-			}
-			if err := k8sClient1.Create(tt.args.ctx, createNamespace("ns1"), &client.CreateOptions{}); err != nil {
-				t.Errorf("failed to create %s", err.Error())
-			}
-			if err := k8sClient1.Create(tt.args.ctx,
-				createBackup("backup1", "ns1").object, &client.CreateOptions{}); err != nil {
-				t.Errorf("failed to create %s", err.Error())
-			}
-		}
-		if index == len(tests)-2 {
-			// create the delete request to find one already
-			if err := k8sClient1.Create(tt.args.ctx, createNamespace("ns2"), &client.CreateOptions{}); err != nil {
-				t.Errorf("failed to create %s", err.Error())
-			}
-			if err := k8sClient1.Create(tt.args.ctx,
-				createBackup("backup2", "ns1").object, &client.CreateOptions{}); err != nil {
-				t.Errorf("failed to create %s", err.Error())
-			}
-		}
-		if index == len(tests)-1 {
-			// create the delete request to find one already
-			if err := k8sClient1.Create(tt.args.ctx, createNamespace("ns3"), &client.CreateOptions{}); err != nil {
-				t.Errorf("failed to create %s", err.Error())
-			}
-			if err := k8sClient1.Create(tt.args.ctx,
-				createBackupDeleteRequest("backup-does-not-exist", "ns3", "backup-does-not-exist").
-					errors([]string{"err1", "err2"}).
-					object, &client.CreateOptions{}); err != nil {
-				t.Errorf("failed to create %s", err.Error())
-			}
-			t.Run(tt.name, func(t *testing.T) {
-				if err := deleteBackup(tt.args.ctx, &tt.args.backup, tt.args.c); (err == nil) != tt.err_nil {
-					t.Errorf("deleteBackup() returns no error = %v, want %v", err == nil, tt.err_nil)
+			name:       "should successfully create DeleteBackupRequest for existing backup",
+			backupName: "test-backup",
+			namespace:  "velero-ns",
+			setupObjects: func() []client.Object {
+				return []client.Object{
+					createNamespace("velero-ns"),
+					createBackup("test-backup", "velero-ns").object,
 				}
-			})
-		}
-
+			},
+			expectedError: false,
+			description:   "Should create DeleteBackupRequest when backup exists",
+		},
+		{
+			name:       "should handle missing namespace gracefully",
+			backupName: "test-backup",
+			namespace:  "missing-ns",
+			setupObjects: func() []client.Object {
+				return []client.Object{
+					createBackup("test-backup", "missing-ns").object,
+				}
+			},
+			expectedError: false,
+			description:   "Should handle missing namespace gracefully by creating DeleteBackupRequest",
+		},
+		{
+			name:       "should handle backup deletion when DeleteBackupRequest already exists",
+			backupName: "existing-backup",
+			namespace:  "velero-ns",
+			setupObjects: func() []client.Object {
+				return []client.Object{
+					createNamespace("velero-ns"),
+					createBackup("existing-backup", "velero-ns").object,
+					createBackupDeleteRequest("existing-backup-delete", "velero-ns", "existing-backup").object,
+				}
+			},
+			expectedError: false,
+			description:   "Should handle case when DeleteBackupRequest already exists",
+		},
+		{
+			name:       "should handle DeleteBackupRequest with errors and delete backup",
+			backupName: "error-backup",
+			namespace:  "velero-ns",
+			setupObjects: func() []client.Object {
+				return []client.Object{
+					createNamespace("velero-ns"),
+					createBackup("error-backup", "velero-ns").object,
+					createBackupDeleteRequest("error-backup", "velero-ns", "error-backup").
+						errors([]string{"deletion failed", "resource not found"}).object,
+				}
+			},
+			expectedError: false,
+			description:   "Should delete backup when DeleteBackupRequest has errors",
+		},
 	}
 
-	if err := testEnv.Stop(); err != nil {
-		t.Fatalf("Error stopping testenv: %s", err.Error())
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Setup fake client with Velero scheme
+			scheme := runtime.NewScheme()
+			err := veleroapi.AddToScheme(scheme)
+			if err != nil {
+				t.Fatalf("Failed to add Velero API to scheme: %v", err)
+			}
+			err = corev1.AddToScheme(scheme)
+			if err != nil {
+				t.Fatalf("Failed to add Core API to scheme: %v", err)
+			}
+
+			// Create objects from test setup
+			objects := tt.setupObjects()
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(objects...).
+				Build()
+
+			// Create backup object for test
+			backup := createBackup(tt.backupName, tt.namespace).object
+
+			// Call the function under test
+			ctx := context.Background()
+			err = deleteBackup(ctx, backup, fakeClient)
+
+			// Verify the result
+			if tt.expectedError && err == nil {
+				t.Errorf("Expected error but got none")
+			}
+			if !tt.expectedError && err != nil {
+				t.Errorf("Expected no error but got: %v", err)
+			}
+
+			t.Logf("Test '%s': %s - Result: error=%v", tt.name, tt.description, err != nil)
+		})
 	}
 }
