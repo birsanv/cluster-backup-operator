@@ -289,7 +289,7 @@ func Test_executePostRestoreTasks(t *testing.T) {
 	}
 }
 
-func Test_deleteDynamicResource(t *testing.T) {
+func Test_deleteDynamicResource_LocalCluster(t *testing.T) {
 	// Channel resource in the local-cluster namespace
 	res_local_ns := &unstructured.Unstructured{}
 	res_local_ns.SetUnstructuredContent(map[string]interface{}{
@@ -320,6 +320,94 @@ func Test_deleteDynamicResource(t *testing.T) {
 		},
 	})
 
+	unstructuredScheme := runtime.NewScheme()
+	err := chnv1.AddToScheme(unstructuredScheme)
+	if err != nil {
+		t.Fatalf("Error adding api to scheme: %s", err.Error())
+	}
+
+	dynClient := dynamicfake.NewSimpleDynamicClient(unstructuredScheme)
+
+	targetGVK := schema.GroupVersionKind{Group: "apps.open-cluster-management.io", Version: "v1", Kind: "Channel"}
+	targetGVR := targetGVK.GroupVersion().WithResource("channel")
+	targetMapping := meta.RESTMapping{
+		Resource: targetGVR, GroupVersionKind: targetGVK,
+		Scope: meta.RESTScopeNamespace,
+	}
+
+	resInterface := dynClient.Resource(targetGVR)
+
+	deletePolicy := metav1.DeletePropagationForeground
+	delOptions := metav1.DeleteOptions{
+		PropagationPolicy: &deletePolicy,
+	}
+
+	type args struct {
+		ctx                     context.Context
+		mapping                 *meta.RESTMapping
+		dr                      dynamic.NamespaceableResourceInterface
+		resource                unstructured.Unstructured
+		localClusterName        string
+		deleteOptions           metav1.DeleteOptions
+		excludedNamespaces      []string
+		skipExcludedBackupLabel bool
+	}
+	tests := []struct {
+		name        string
+		args        args
+		want        bool
+		errMsgEmpty bool
+	}{
+		{
+			name: "Delete local cluster resource (local-cluster named 'local-cluster')",
+			args: args{
+				ctx:                     context.Background(),
+				mapping:                 &targetMapping,
+				dr:                      resInterface,
+				resource:                *res_local_ns,
+				localClusterName:        "local-cluster",
+				deleteOptions:           delOptions,
+				excludedNamespaces:      []string{"abc"},
+				skipExcludedBackupLabel: false,
+			},
+			want:        false,
+			errMsgEmpty: true,
+		},
+		{
+			name: "Delete local cluster resource (local-cluster named 'hub1ns')",
+			args: args{
+				ctx:                     context.Background(),
+				mapping:                 &targetMapping,
+				dr:                      resInterface,
+				resource:                *res_local_ns_uniquename,
+				localClusterName:        "hub1ns",
+				deleteOptions:           delOptions,
+				excludedNamespaces:      []string{"abc"},
+				skipExcludedBackupLabel: false,
+			},
+			want:        false,
+			errMsgEmpty: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got, msg := deleteDynamicResource(tt.args.ctx,
+				tt.args.mapping,
+				tt.args.dr,
+				tt.args.resource,
+				tt.args.excludedNamespaces,
+				tt.args.localClusterName,
+				tt.args.skipExcludedBackupLabel); got != tt.want ||
+				(tt.errMsgEmpty && len(msg) != 0) ||
+				(!tt.errMsgEmpty && len(msg) == 0) {
+				t.Errorf("deleteDynamicResource() = %v, want %v, emptyMsg=%v, msg=%v", got,
+					tt.want, tt.errMsgEmpty, msg)
+			}
+		})
+	}
+}
+
+func Test_deleteDynamicResource_DefaultNamespace(t *testing.T) {
 	res_default := &unstructured.Unstructured{}
 	res_default.SetUnstructuredContent(map[string]interface{}{
 		"apiVersion": "apps.open-cluster-management.io/v1",
@@ -380,46 +468,6 @@ func Test_deleteDynamicResource(t *testing.T) {
 		},
 	})
 
-	res_global := &unstructured.Unstructured{}
-	res_global.SetUnstructuredContent(map[string]interface{}{
-		"apiVersion": "apps.open-cluster-management.io/v1",
-		"kind":       "Channel",
-		"metadata": map[string]interface{}{
-			"name": "channel-new-global",
-		},
-		"spec": map[string]interface{}{
-			"type":     "Git",
-			"pathname": "https://github.com/test/app-samples",
-		},
-	})
-
-	res_global_with_finalizer := &unstructured.Unstructured{}
-	res_global_with_finalizer.SetUnstructuredContent(map[string]interface{}{
-		"apiVersion": "apps.open-cluster-management.io/v1",
-		"kind":       "Channel",
-		"metadata": map[string]interface{}{
-			"name":       "channel-new-global-with-finalizer",
-			"finalizers": []interface{}{"aaa", "bbb"},
-		},
-		"spec": map[string]interface{}{
-			"type":     "Git",
-			"pathname": "https://github.com/test/app-samples",
-		},
-	})
-
-	res_global_notfound := &unstructured.Unstructured{}
-	res_global_notfound.SetUnstructuredContent(map[string]interface{}{
-		"apiVersion": "apps.open-cluster-management.io/v1",
-		"kind":       "Channel",
-		"metadata": map[string]interface{}{
-			"name": "channel-new-global-not-found",
-		},
-		"spec": map[string]interface{}{
-			"type":     "Git",
-			"pathname": "https://github.com/test/app-samples",
-		},
-	})
-
 	unstructuredScheme := runtime.NewScheme()
 	err := chnv1.AddToScheme(unstructuredScheme)
 	if err != nil {
@@ -429,8 +477,6 @@ func Test_deleteDynamicResource(t *testing.T) {
 	dynClient := dynamicfake.NewSimpleDynamicClient(unstructuredScheme,
 		res_default,
 		res_default_with_finalizer,
-		res_global,
-		res_global_with_finalizer,
 		res_exclude_from_backup,
 	)
 
@@ -439,11 +485,6 @@ func Test_deleteDynamicResource(t *testing.T) {
 	targetMapping := meta.RESTMapping{
 		Resource: targetGVR, GroupVersionKind: targetGVK,
 		Scope: meta.RESTScopeNamespace,
-	}
-
-	targetMappingGlobal := meta.RESTMapping{
-		Resource: targetGVR, GroupVersionKind: targetGVK,
-		Scope: meta.RESTScopeRoot,
 	}
 
 	resInterface := dynClient.Resource(targetGVR)
@@ -455,14 +496,6 @@ func Test_deleteDynamicResource(t *testing.T) {
 	}
 	_, err = resInterface.Namespace("default").Create(context.Background(),
 		res_default_with_finalizer, metav1.CreateOptions{})
-	if err != nil {
-		t.Fatalf("Err creating: %s", err.Error())
-	}
-	_, err = resInterface.Create(context.Background(), res_global, metav1.CreateOptions{})
-	if err != nil {
-		t.Fatalf("Err creating: %s", err.Error())
-	}
-	_, err = resInterface.Create(context.Background(), res_global_with_finalizer, metav1.CreateOptions{})
 	if err != nil {
 		t.Fatalf("Err creating: %s", err.Error())
 	}
@@ -488,36 +521,6 @@ func Test_deleteDynamicResource(t *testing.T) {
 		want        bool
 		errMsgEmpty bool
 	}{
-		{
-			name: "Delete local cluster resource (local-cluster named 'local-cluster')",
-			args: args{
-				ctx:                     context.Background(),
-				mapping:                 &targetMapping,
-				dr:                      resInterface,
-				resource:                *res_local_ns,
-				localClusterName:        "local-cluster",
-				deleteOptions:           delOptions,
-				excludedNamespaces:      []string{"abc"},
-				skipExcludedBackupLabel: false,
-			},
-			want:        false,
-			errMsgEmpty: true,
-		},
-		{
-			name: "Delete local cluster resource (local-cluster named 'hub1ns')",
-			args: args{
-				ctx:                     context.Background(),
-				mapping:                 &targetMapping,
-				dr:                      resInterface,
-				resource:                *res_local_ns_uniquename,
-				localClusterName:        "hub1ns",
-				deleteOptions:           delOptions,
-				excludedNamespaces:      []string{"abc"},
-				skipExcludedBackupLabel: false,
-			},
-			want:        false,
-			errMsgEmpty: true,
-		},
 		{
 			name: "Delete default resource",
 			args: args{
@@ -609,6 +612,118 @@ func Test_deleteDynamicResource(t *testing.T) {
 			want:        true,
 			errMsgEmpty: false,
 		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got, msg := deleteDynamicResource(tt.args.ctx,
+				tt.args.mapping,
+				tt.args.dr,
+				tt.args.resource,
+				tt.args.excludedNamespaces,
+				tt.args.localClusterName,
+				tt.args.skipExcludedBackupLabel); got != tt.want ||
+				(tt.errMsgEmpty && len(msg) != 0) ||
+				(!tt.errMsgEmpty && len(msg) == 0) {
+				t.Errorf("deleteDynamicResource() = %v, want %v, emptyMsg=%v, msg=%v", got,
+					tt.want, tt.errMsgEmpty, msg)
+			}
+		})
+	}
+}
+
+func Test_deleteDynamicResource_GlobalResources(t *testing.T) {
+	res_global := &unstructured.Unstructured{}
+	res_global.SetUnstructuredContent(map[string]interface{}{
+		"apiVersion": "apps.open-cluster-management.io/v1",
+		"kind":       "Channel",
+		"metadata": map[string]interface{}{
+			"name": "channel-new-global",
+		},
+		"spec": map[string]interface{}{
+			"type":     "Git",
+			"pathname": "https://github.com/test/app-samples",
+		},
+	})
+
+	res_global_with_finalizer := &unstructured.Unstructured{}
+	res_global_with_finalizer.SetUnstructuredContent(map[string]interface{}{
+		"apiVersion": "apps.open-cluster-management.io/v1",
+		"kind":       "Channel",
+		"metadata": map[string]interface{}{
+			"name":       "channel-new-global-with-finalizer",
+			"finalizers": []interface{}{"aaa", "bbb"},
+		},
+		"spec": map[string]interface{}{
+			"type":     "Git",
+			"pathname": "https://github.com/test/app-samples",
+		},
+	})
+
+	res_global_notfound := &unstructured.Unstructured{}
+	res_global_notfound.SetUnstructuredContent(map[string]interface{}{
+		"apiVersion": "apps.open-cluster-management.io/v1",
+		"kind":       "Channel",
+		"metadata": map[string]interface{}{
+			"name": "channel-new-global-not-found",
+		},
+		"spec": map[string]interface{}{
+			"type":     "Git",
+			"pathname": "https://github.com/test/app-samples",
+		},
+	})
+
+	unstructuredScheme := runtime.NewScheme()
+	err := chnv1.AddToScheme(unstructuredScheme)
+	if err != nil {
+		t.Fatalf("Error adding api to scheme: %s", err.Error())
+	}
+
+	dynClient := dynamicfake.NewSimpleDynamicClient(unstructuredScheme,
+		res_global,
+		res_global_with_finalizer,
+	)
+
+	targetGVK := schema.GroupVersionKind{Group: "apps.open-cluster-management.io", Version: "v1", Kind: "Channel"}
+	targetGVR := targetGVK.GroupVersion().WithResource("channel")
+
+	targetMappingGlobal := meta.RESTMapping{
+		Resource: targetGVR, GroupVersionKind: targetGVK,
+		Scope: meta.RESTScopeRoot,
+	}
+
+	resInterface := dynClient.Resource(targetGVR)
+
+	// create resources which should be found
+	_, err = resInterface.Create(context.Background(), res_global, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("Err creating: %s", err.Error())
+	}
+	_, err = resInterface.Create(context.Background(), res_global_with_finalizer, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("Err creating: %s", err.Error())
+	}
+
+	deletePolicy := metav1.DeletePropagationForeground
+	delOptions := metav1.DeleteOptions{
+		PropagationPolicy: &deletePolicy,
+	}
+
+	type args struct {
+		ctx                     context.Context
+		mapping                 *meta.RESTMapping
+		dr                      dynamic.NamespaceableResourceInterface
+		resource                unstructured.Unstructured
+		localClusterName        string
+		deleteOptions           metav1.DeleteOptions
+		excludedNamespaces      []string
+		skipExcludedBackupLabel bool
+	}
+	tests := []struct {
+		name        string
+		args        args
+		want        bool
+		errMsgEmpty bool
+	}{
 		{
 			name: "Delete global resource",
 			args: args{
@@ -1413,7 +1528,7 @@ func Test_cleanupDeltaForCredentials(t *testing.T) {
 	}
 }
 
-func Test_cleanupDeltaForResourcesAndClustersBackup(t *testing.T) {
+func Test_cleanupDeltaForResourcesBackup(t *testing.T) {
 	log.SetLogger(zap.New())
 
 	// Use helper function for scheme setup
@@ -1427,34 +1542,14 @@ func Test_cleanupDeltaForResourcesAndClustersBackup(t *testing.T) {
 	resourcesBackup := backupSetup.ResourcesBackup
 	genericBackup := backupSetup.GenericBackup
 	genericBackupOld := backupSetup.GenericBackupOld
-	clustersBackup := backupSetup.ClustersBackup
-	clustersBackupOld := backupSetup.ClustersBackupOld
 
-	clusterNamespace := backupSetup.ClusterNamespace
 	namespaceName := backupSetup.NamespaceName
 
 	// Get backup names for compatibility with existing test logic
 	veleroResourcesBackupName := backupSetup.VeleroResourcesBackupName
-	veleroResourcesBackupNameOlder := veleroScheduleNames[Resources] + "-" + backupSetup.TenHourAgoTime
 	veleroGenericBackupName := backupSetup.VeleroGenericBackupName
 	veleroGenericBackupNameOlder := backupSetup.VeleroGenericBackupNameOlder
 	veleroClustersBackupName := backupSetup.VeleroClustersBackupName
-	veleroClustersBackupNameOlder := backupSetup.VeleroClustersBackupNameOlder
-
-	// Namespace objects are created by the test setup but not used directly in test cases
-
-	// Use helper functions for ManagedCluster creation
-	cls_with_backup_label_same := withBackupLabel(
-		createManagedClusterUnstructured("cls-with-backup-label-same", "default"),
-		clustersBackup.Name)
-	cls_with_backup_label_diff_excl_ns := withBackupLabel(
-		createManagedClusterUnstructured("cls-with-backup-label-diff-excl-ns", "local-cluster"),
-		backupSetup.VeleroClustersBackupNameOlder)
-	cls_with_backup_label_diff := withFinalizers(withBackupLabel(
-		createManagedClusterUnstructured("channel-with-backup-label-diff", "default"),
-		backupSetup.VeleroClustersBackupNameOlder),
-		[]string{"hive.openshift.io/deprovision"})
-	cls_with_no_backup_label := createManagedClusterUnstructured("cls-with-no-backup-label", "default")
 
 	// Use helper functions for Channel creation
 	channel_with_backup_label_same := withBackupLabel(
@@ -1471,7 +1566,6 @@ func Test_cleanupDeltaForResourcesAndClustersBackup(t *testing.T) {
 		createChannelUnstructured("channel-with-backup-label-generic", "default"),
 		veleroResourcesBackupName))
 	channel_with_no_backup_label := createChannelUnstructured("channel-with-no-backup-label", "default")
-	msaObj := createMSAUnstructured("auto-import-account", clusterNamespace)
 
 	channel_with_backup_label_generic_match := withGenericLabel(withBackupLabel(
 		createChannelUnstructured("channel-with-backup-label-generic-match", "default"),
@@ -1503,513 +1597,32 @@ func Test_cleanupDeltaForResourcesAndClustersBackup(t *testing.T) {
 	labels[backupCredsClusterLabel] = ClusterActivationLabel
 	channel_with_backup_label_generic_old_activ.SetLabels(labels)
 
-	// Create ClusterVersion object (no helper function available, keep manual creation)
-	clsvObj := &unstructured.Unstructured{}
-	clsvObj.SetUnstructuredContent(map[string]interface{}{
-		"apiVersion": "config.openshift.io/v1",
-		"kind":       "ClusterVersion",
-		"metadata": map[string]interface{}{
-			"name": "version",
-		},
-		"spec": map[string]interface{}{
-			"clusterID": "1234",
-		},
-	})
-
-	msaGVK := schema.GroupVersionKind{
-		Group:   "authentication.open-cluster-management.io",
-		Version: "v1beta1", Kind: "ManagedServiceAccount",
-	}
-	msaGVRList := schema.GroupVersionResource{
-		Group:   "authentication.open-cluster-management.io",
-		Version: "v1beta1", Resource: "managedserviceaccounts",
-	}
-
-	// cluster deployments
-	clsDGVK := schema.GroupVersionKind{
-		Group:   "hive.openshift.io",
-		Version: "v1", Kind: "ClusterDeployment",
-	}
-	clsDGVKList := schema.GroupVersionResource{
-		Group:   "hive.openshift.io",
-		Version: "v1", Resource: "clusterdeployments",
-	}
-
-	// placements
-	plsGVK := schema.GroupVersionKind{
-		Group:   "cluster.open-cluster-management.io",
-		Version: "v1beta1", Kind: "Placement",
-	}
-	plsGVKGVKList := schema.GroupVersionResource{
-		Group:   "cluster.open-cluster-management.io",
-		Version: "v1beta1", Resource: "placements",
-	}
-	// curators
-	crGVK := schema.GroupVersionKind{
-		Group:   "cluster.open-cluster-management.io",
-		Version: "v1beta1", Kind: "ClusterCurator",
-	}
-	crGVKGVKList := schema.GroupVersionResource{
-		Group:   "cluster.open-cluster-management.io",
-		Version: "v1beta1", Resource: "clustercurators",
-	}
-	// channels
-	chGVK := schema.GroupVersionKind{
-		Group:   "apps.open-cluster-management.io",
-		Version: "v1beta1", Kind: "Channel",
-	}
-	chGVKList := schema.GroupVersionResource{
-		Group:   "apps.open-cluster-management.io",
-		Version: "v1beta1", Resource: "channels",
-	}
-	// subs
-	subsGVK := schema.GroupVersionKind{
-		Group:   "apps.open-cluster-management.io",
-		Version: "v1beta1", Kind: "Subscription",
-	}
-	subsGVKList := schema.GroupVersionResource{
-		Group:   "apps.open-cluster-management.io",
-		Version: "v1beta1", Resource: "subscriptions",
-	}
-
-	// managed clusters
-	clsGVK := schema.GroupVersionKind{
-		Group:   "cluster.open-cluster-management.io",
-		Version: "v1beta1", Kind: "ManagedCluster",
-	}
-	clsGVKList := schema.GroupVersionResource{
-		Group:   "cluster.open-cluster-management.io",
-		Version: "v1beta1", Resource: "managedclusters",
-	}
-	// managed clusters sets
-	clsSGVK := schema.GroupVersionKind{
-		Group:   "cluster.open-cluster-management.io",
-		Version: "v1beta1", Kind: "ManagedClusterSet",
-	}
-	clsSGVKList := schema.GroupVersionResource{
-		Group:   "cluster.open-cluster-management.io",
-		Version: "v1beta1", Resource: "managedclustersets",
-	}
-	// backups
-	bsSGVK := schema.GroupVersionKind{
-		Group:   "cluster.open-cluster-management.io",
-		Version: "v1beta1", Kind: "BackupSchedule",
-	}
-	bsSGVKList := schema.GroupVersionResource{
-		Group:   "cluster.open-cluster-management.io",
-		Version: "v1beta1", Resource: "backupschedules",
-	}
-	// mutators
-	mGVK := schema.GroupVersionKind{
-		Group:   "proxy.open-cluster-management.io",
-		Version: "v1beta1", Kind: "AdmissionReview",
-	}
-	mVKList := schema.GroupVersionResource{
-		Group:   "proxy.open-cluster-management.io",
-		Version: "v1beta1", Resource: "managedclustermutators",
-	}
-	// pools
-	cpGVK := schema.GroupVersionKind{
-		Group:   "hive.openshift.io",
-		Version: "v1", Kind: "ClusterPool",
-	}
-	cpVKList := schema.GroupVersionResource{
-		Group:   "hive.openshift.io",
-		Version: "v1", Resource: "clusterpools",
-	}
-	// dns
-	dnsGVK := schema.GroupVersionKind{
-		Group:   "hive.openshift.io",
-		Version: "v1", Kind: "DNSZone",
-	}
-	dnsVKList := schema.GroupVersionResource{
-		Group:   "hive.openshift.io",
-		Version: "v1", Resource: "dnszones",
-	}
-	// image set
-	imgGVK := schema.GroupVersionKind{
-		Group:   "hive.openshift.io",
-		Version: "v1", Kind: "ClusterImageSet",
-	}
-	imgVKList := schema.GroupVersionResource{
-		Group:   "hive.openshift.io",
-		Version: "v1", Resource: "clusterimageset",
-	}
-	// hive config
-	hGVK := schema.GroupVersionKind{
-		Group:   "hive.openshift.io",
-		Version: "v1", Kind: "HiveConfig",
-	}
-	hVKList := schema.GroupVersionResource{
-		Group:   "hive.openshift.io",
-		Version: "v1", Resource: "hiveconfig",
-	}
-
-	// addon
-	aoGVK := schema.GroupVersionKind{
-		Group:   "addon.open-cluster-management.io",
-		Version: "v1alpha1", Kind: "ManagedClusterAddOn",
-	}
-	aoVKList := schema.GroupVersionResource{
-		Group:   "addon.open-cluster-management.io",
-		Version: "v1alpha1", Resource: "managedclusteraddons",
-	}
-
-	// cluster version
-	clsVGVK := schema.GroupVersionKind{
-		Group:   "config.openshift.io",
-		Version: "v1", Kind: "ClusterVersion",
-	}
-	clsVGVKList := schema.GroupVersionResource{
-		Group:   "config.openshift.io",
-		Version: "v1", Resource: "clusterversions",
-	}
-
-	///
-	gvrToListKind := map[schema.GroupVersionResource]string{
-		msaGVRList:    "ManagedServiceAccountList",
-		clsVGVKList:   "ClusterVersionList",
-		clsDGVKList:   "ClusterDeploymentList",
-		plsGVKGVKList: "PlacementList",
-		crGVKGVKList:  "ClusterCuratorList",
-		chGVKList:     "ChannelList",
-		clsGVKList:    "ManagedClusterList",
-		clsSGVKList:   "ManagedClusterSetList",
-		bsSGVKList:    "BackupScheduleList",
-		mVKList:       "AdmissionReviewList",
-		cpVKList:      "ClusterPoolList",
-		dnsVKList:     "DNSZoneList",
-		imgVKList:     "ClusterImageSetList",
-		hVKList:       "HiveConfigList",
-		subsGVKList:   "SubscriptionList",
-		aoVKList:      "ManagedClusterAddOnList",
-	}
-
-	channelRuntimeObjects := []runtime.Object{
-		channel_with_backup_label_same,
-		channel_with_backup_label_diff,
-		channel_with_backup_label_diff_excl_ns,
-		channel_with_backup_label_generic,
-		channel_with_no_backup_label,
-		channel_with_backup_label_generic_match,
-		channel_with_backup_label_generic_old,
-		channel_with_backup_label_generic_match_activ,
-		channel_with_backup_label_generic_old_activ,
-	}
-	clusterRuntimeObjects := []runtime.Object{
-		cls_with_backup_label_same,
-		cls_with_backup_label_diff,
-		cls_with_backup_label_diff_excl_ns,
-		cls_with_no_backup_label,
-	}
-	unstructuredScheme := runtime.NewScheme()
-	unstructuredScheme.AddKnownTypes(msaGVK.GroupVersion(), msaObj)
-	unstructuredScheme.AddKnownTypes(clsVGVK.GroupVersion(), clsvObj)
-	unstructuredScheme.AddKnownTypes(clsDGVK.GroupVersion())
-	unstructuredScheme.AddKnownTypes(plsGVK.GroupVersion())
-	unstructuredScheme.AddKnownTypes(crGVK.GroupVersion())
-	unstructuredScheme.AddKnownTypes(chGVK.GroupVersion(), channelRuntimeObjects...)
-	unstructuredScheme.AddKnownTypes(clsGVK.GroupVersion(), clusterRuntimeObjects...)
-	unstructuredScheme.AddKnownTypes(clsSGVK.GroupVersion())
-	unstructuredScheme.AddKnownTypes(bsSGVK.GroupVersion())
-	unstructuredScheme.AddKnownTypes(mGVK.GroupVersion())
-	unstructuredScheme.AddKnownTypes(cpGVK.GroupVersion())
-	unstructuredScheme.AddKnownTypes(dnsGVK.GroupVersion())
-	unstructuredScheme.AddKnownTypes(imgGVK.GroupVersion())
-	unstructuredScheme.AddKnownTypes(hGVK.GroupVersion())
-	unstructuredScheme.AddKnownTypes(subsGVK.GroupVersion())
-	unstructuredScheme.AddKnownTypes(aoGVK.GroupVersion())
-
-	// Create a local cluster managedcluster object
-	ns_myhub1 := *createNamespace("myhub1")
-	myhub1_cluster := *createManagedCluster("myhub1", true /* local cluster */).object
-
-	k8sClient1 := fake.NewClientBuilder().
-		WithScheme(scheme1).
-		WithObjects(
-			&ns_myhub1,
-			&myhub1_cluster,
-			&resourcesBackup,
-			&genericBackup,
-			&genericBackupOld,
-			&clustersBackup,
-			&clustersBackupOld,
-		).
-		Build()
-
-	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(unstructuredScheme,
-		gvrToListKind,
-		channelRuntimeObjects...)
-
-	argov1alphaInfo := metav1.APIResourceList{
-		GroupVersion: "argoproj.io/v1alpha1",
-		APIResources: []metav1.APIResource{
-			{Name: "applications", Namespaced: true, Kind: "Application"},
-			{Name: "applicationsets", Namespaced: true, Kind: "ApplicationSet"},
-			{Name: "argocds", Namespaced: true, Kind: "Argocd"},
-		},
-	}
-	openshiftv1Info := metav1.APIResourceList{
-		GroupVersion: "config.openshift.io/v1",
-		APIResources: []metav1.APIResource{
-			{Name: "clusterversions", Namespaced: false, Kind: "ClusterVersion"},
-		},
-	}
-	appsInfo := metav1.APIResourceList{
-		GroupVersion: "apps.open-cluster-management.io/v1beta1",
-		APIResources: []metav1.APIResource{
-			{Name: "channels", Namespaced: true, Kind: "Channel"},
-			{Name: "subscriptions", Namespaced: true, Kind: "Subscription"},
-		},
-	}
-	appsInfoV1 := metav1.APIResourceList{
-		GroupVersion: "apps.open-cluster-management.io/v1",
-		APIResources: []metav1.APIResource{
-			{Name: "channels", Namespaced: true, Kind: "Channel"},
-			{Name: "subscriptions", Namespaced: true, Kind: "Subscription"},
-		},
-	}
-	addonInfo := metav1.APIResourceList{
-		GroupVersion: "addon.open-cluster-management.io/v1alpha1",
-		APIResources: []metav1.APIResource{
-			{Name: "managedclusteraddons", Namespaced: true, Kind: "ManagedClusterAddOn"},
-		},
-	}
-	clusterv1beta1Info := metav1.APIResourceList{
-		GroupVersion: "cluster.open-cluster-management.io/v1beta1",
-		APIResources: []metav1.APIResource{
-			{Name: "placements", Namespaced: true, Kind: "Placement"},
-			{Name: "clustercurators", Namespaced: true, Kind: "ClusterCurator"},
-			{Name: "managedclustersets", Namespaced: false, Kind: "ManagedClusterSet"},
-			{Name: "backupschedules", Namespaced: true, Kind: "BackupSchedule"},
-			{Name: "managedclusters", Namespaced: true, Kind: "ManagedCluster"},
-		},
-	}
-	clusterv1Info := metav1.APIResourceList{
-		GroupVersion: "cluster.open-cluster-management.io/v1",
-		APIResources: []metav1.APIResource{
-			{Name: "placements", Namespaced: true, Kind: "Placement"},
-			{Name: "clustercurators", Namespaced: true, Kind: "ClusterCurator"},
-			{Name: "managedclustersets", Namespaced: false, Kind: "ManagedClusterSet"},
-			{Name: "backupschedules", Namespaced: true, Kind: "BackupSchedule"},
-			{Name: "managedclusters", Namespaced: true, Kind: "ManagedCluster"},
-		},
-	}
-	excluded := metav1.APIResourceList{
-		GroupVersion: "proxy.open-cluster-management.io/v1beta1",
-		APIResources: []metav1.APIResource{
-			{Name: "managedclustermutators", Namespaced: false, Kind: "AdmissionReview"},
-		},
-	}
-	hiveInfo := metav1.APIResourceList{
-		GroupVersion: "hive.openshift.io/v1",
-		APIResources: []metav1.APIResource{
-			{Name: "clusterpools", Namespaced: true, Kind: "ClusterPool"},
-			{Name: "clusterdeployments", Namespaced: false, Kind: "ClusterDeployment"},
-			{Name: "dnszones", Namespaced: false, Kind: "DNSZone"},
-			{Name: "clusterimageset", Namespaced: false, Kind: "ClusterImageSet"},
-			{Name: "hiveconfig", Namespaced: false, Kind: "HiveConfig"},
-		},
-	}
-	authAlpha1 := metav1.APIResourceList{
-		GroupVersion: "authentication.open-cluster-management.io/v1beta1",
-		APIResources: []metav1.APIResource{
-			{Name: "managedserviceaccounts", Namespaced: true, Kind: "ManagedServiceAccount"},
-		},
-	}
-
-	server1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		var list interface{}
-		switch req.URL.Path {
-		case "/apis/cluster.open-cluster-management.io/v1beta1":
-			list = &clusterv1beta1Info
-		case "/apis/cluster.open-cluster-management.io/v1":
-			list = &clusterv1Info
-		case "/apis/proxy.open-cluster-management.io/v1beta1":
-			list = &excluded
-		case "/apis/hive.openshift.io/v1":
-			list = &hiveInfo
-		case "/apis/authentication.open-cluster-management.io/v1beta1":
-			list = authAlpha1
-		case "/apis/apps.open-cluster-management.io/v1beta1":
-			list = &appsInfo
-		case "/apis/apps.open-cluster-management.io/v1":
-			list = &appsInfoV1
-		case "/apis/argoproj.io/v1alpha1":
-			list = &argov1alphaInfo
-		case "/apis/config.openshift.io/v1":
-			list = &openshiftv1Info
-		case "/apis/addon.open-cluster-management.io/v1alpha1":
-			list = &addonInfo
-
-		case "/api":
-			list = &metav1.APIVersions{
-				Versions: []string{
-					"v1",
-					"v1beta1",
-				},
-			}
-		case "/apis":
-			list = &metav1.APIGroupList{
-				Groups: []metav1.APIGroup{
-					{
-						Name: "config.openshift.io",
-						Versions: []metav1.GroupVersionForDiscovery{
-							{
-								GroupVersion: "config.openshift.io/v1",
-								Version:      "v1",
-							},
-						},
-					},
-					{
-						Name: "argoproj.io",
-						Versions: []metav1.GroupVersionForDiscovery{
-							{
-								GroupVersion: "argoproj.io/v1",
-								Version:      "v1",
-							},
-							{
-								GroupVersion: "argoproj.io/v1beta1",
-								Version:      "v1beta1",
-							},
-						},
-					},
-					{
-						Name: "cluster.open-cluster-management.io",
-						Versions: []metav1.GroupVersionForDiscovery{
-							{
-								GroupVersion: "cluster.open-cluster-management.io/v1beta1",
-								Version:      "v1beta1",
-							},
-							{
-								GroupVersion: "cluster.open-cluster-management.io/v1",
-								Version:      "v1",
-							},
-						},
-					},
-					{
-						Name: "proxy.open-cluster-management.io",
-						Versions: []metav1.GroupVersionForDiscovery{
-							{
-								GroupVersion: "proxy.open-cluster-management.io/v1beta1",
-								Version:      "v1beta1",
-							},
-							{
-								GroupVersion: "proxy.open-cluster-management.io/v1",
-								Version:      "v1",
-							},
-						},
-					},
-					{
-						Name: "hive.openshift.io",
-						Versions: []metav1.GroupVersionForDiscovery{
-							{GroupVersion: "hive.openshift.io/v1", Version: "v1"},
-							{GroupVersion: "hive.openshift.io/v1beta1", Version: "v1beta1"},
-						},
-					},
-					{
-						Name: "apps.open-cluster-management.io",
-						Versions: []metav1.GroupVersionForDiscovery{
-							{GroupVersion: "apps.open-cluster-management.io/v1beta1", Version: "v1beta1"},
-							{GroupVersion: "apps.open-cluster-management.io/v1", Version: "v1"},
-						},
-					},
-					{
-						Name: "authentication.open-cluster-management.io",
-						Versions: []metav1.GroupVersionForDiscovery{
-							{GroupVersion: "authentication.open-cluster-management.io/v1beta1", Version: "v1beta1"},
-						},
-					},
-					{
-						Name: "addon.open-cluster-management.io",
-						Versions: []metav1.GroupVersionForDiscovery{
-							{GroupVersion: "addon.open-cluster-management.io/v1alpha1", Version: "v1alpha1"},
-						},
-					},
-				},
-			}
-		default:
-			// t.Logf("unexpected request: %s", req.URL.Path)
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		output, err := json.Marshal(list)
-		if err != nil {
-			// t.Errorf("unexpected encoding error: %v", err)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, err = w.Write(output)
-		if err != nil {
-			return
-		}
-	}))
+	// Setup test infrastructure (discovery server, dynamic client, etc.)
+	server1 := setupMockDiscoveryServer(t)
+	defer server1.Close()
 
 	fakeDiscovery := discoveryclient.NewDiscoveryClientForConfigOrDie(
 		&restclient.Config{Host: server1.URL},
 	)
 
-	testRequest := "authentication.open-cluster-management.io/v1beta1"
-	_, err = fakeDiscovery.ServerResourcesForGroupVersion(testRequest)
-	if err != nil {
-		t.Fatalf("Unexpected error: %s", err.Error())
-	}
+	k8sClient1 := fake.NewClientBuilder().
+		WithScheme(scheme1).
+		Build()
 
-	// create some channel resources
-	_, err = dyn.Resource(chGVKList).Namespace("default").Create(context.Background(),
-		channel_with_backup_label_same, metav1.CreateOptions{})
-	if client.IgnoreAlreadyExists(err) != nil {
-		t.Fatalf("Error creating: %s", err.Error())
+	// Define custom list kinds for the dynamic client
+	listKinds := map[schema.GroupVersionResource]string{
+		{Group: "apps.open-cluster-management.io", Version: "v1beta1", Resource: "channels"}:                         "ChannelList",
+		{Group: "apps.open-cluster-management.io", Version: "v1", Resource: "channels"}:                              "ChannelList",
+		{Group: "apps.open-cluster-management.io", Version: "v1beta1", Resource: "subscriptions"}:                    "SubscriptionList",
+		{Group: "apps.open-cluster-management.io", Version: "v1", Resource: "subscriptions"}:                         "SubscriptionList",
+		{Group: "authentication.open-cluster-management.io", Version: "v1beta1", Resource: "managedserviceaccounts"}: "ManagedServiceAccountList",
 	}
-	_, err = dyn.Resource(chGVKList).Namespace("default").Create(context.Background(),
-		channel_with_backup_label_diff, metav1.CreateOptions{})
-	if client.IgnoreAlreadyExists(err) != nil {
-		t.Fatalf("Error creating: %s", err.Error())
-	}
-	_, err = dyn.Resource(chGVKList).Namespace("local-cluster").Create(context.Background(),
-		channel_with_backup_label_diff_excl_ns, metav1.CreateOptions{})
-	if client.IgnoreAlreadyExists(err) != nil {
-		t.Fatalf("Error creating: %s", err.Error())
-	}
-	_, err = dyn.Resource(chGVKList).Namespace("default").Create(context.Background(),
-		channel_with_backup_label_generic, metav1.CreateOptions{})
-	if client.IgnoreAlreadyExists(err) != nil {
-		t.Fatalf("Error creating: %s", err.Error())
-	}
-	_, err = dyn.Resource(chGVKList).Namespace("default").Create(context.Background(),
-		channel_with_no_backup_label, metav1.CreateOptions{})
-	if client.IgnoreAlreadyExists(err) != nil {
-		t.Fatalf("Error creating: %s", err.Error())
-	}
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme1, listKinds)
 
-	// create some cluster resources
-	_, err = dyn.Resource(clsGVKList).Namespace("default").Create(context.Background(),
-		cls_with_backup_label_diff, metav1.CreateOptions{})
-	if err != nil {
-		t.Fatalf("Error creating: %s", err.Error())
-	}
-	_, err = dyn.Resource(clsGVKList).Namespace("default").Create(context.Background(),
-		cls_with_backup_label_same, metav1.CreateOptions{})
-	if err != nil {
-		t.Fatalf("Error creating: %s", err.Error())
-	}
-	_, err = dyn.Resource(clsGVKList).Namespace("local-cluster").Create(context.Background(),
-		cls_with_backup_label_diff_excl_ns, metav1.CreateOptions{})
-	if err != nil {
-		t.Fatalf("Error creating: %s", err.Error())
-	}
-	_, err = dyn.Resource(clsGVKList).Namespace("default").Create(context.Background(),
-		cls_with_no_backup_label, metav1.CreateOptions{})
-	if err != nil {
-		t.Fatalf("Error creating: %s", err.Error())
-	}
-
-	//
-	_, err = dyn.Resource(msaGVRList).Namespace(clusterNamespace).Create(context.Background(),
-		msaObj, metav1.CreateOptions{})
-	if err != nil {
-		t.Fatalf("Error creating: %s", err.Error())
+	// Setup GVR for channels
+	chGVKList := schema.GroupVersionResource{
+		Group:   "apps.open-cluster-management.io",
+		Version: "v1beta1", Resource: "channels",
 	}
 
 	reconcileArgs := DynamicStruct{
@@ -2041,7 +1654,8 @@ func Test_cleanupDeltaForResourcesAndClustersBackup(t *testing.T) {
 		veleroBackup   *veleroapi.Backup
 		backupName     string
 	}
-	testsResources := []struct {
+
+	tests := []struct {
 		name                 string
 		args                 args
 		resourcesToBeDeleted []unstructured.Unstructured
@@ -2092,16 +1706,19 @@ func Test_cleanupDeltaForResourcesAndClustersBackup(t *testing.T) {
 					}).
 					object,
 			},
-			resourcesToBeDeleted: []unstructured.Unstructured{*channel_with_backup_label_diff},
+			resourcesToBeDeleted: []unstructured.Unstructured{
+				*channel_with_backup_label_diff,
+				*channel_with_backup_label_generic, // This has generic label but different backup name, so it gets deleted
+			},
 			resourcesToKeep: []unstructured.Unstructured{
 				*channel_with_no_backup_label,
-				*channel_with_backup_label_generic,
 				*channel_with_backup_label_same,
 				*channel_with_backup_label_diff_excl_ns,
 			},
 			extraBackups: []veleroapi.Backup{genericBackupOld},
 			resourcesToCreate: []unstructured.Unstructured{
-				*channel_with_backup_label_diff, // this is the one deleted by the previous test, add it back
+				*channel_with_backup_label_diff,    // this is the one deleted by the previous test, add it back
+				*channel_with_backup_label_generic, // this is expected to be deleted in this test, so recreate it
 			},
 		},
 		{
@@ -2129,12 +1746,11 @@ func Test_cleanupDeltaForResourcesAndClustersBackup(t *testing.T) {
 				*channel_with_backup_label_diff_excl_ns,
 				*channel_with_backup_label_generic_match,
 				*channel_with_backup_label_generic_match_activ,
-				*channel_with_backup_label_generic_old, // should not be deleted since the matching generic backup was not found
-				*channel_with_backup_label_generic,     // should not be deleted since the matching generic backup was not found
-
+				*channel_with_backup_label_generic_old,
+				*channel_with_backup_label_generic,
 			},
 			extraBackups: []veleroapi.Backup{},
-			resourcesToCreate: []unstructured.Unstructured{ // this is the one deleted by the previous test, add it back
+			resourcesToCreate: []unstructured.Unstructured{
 				*channel_with_backup_label_diff,
 			},
 		},
@@ -2157,7 +1773,7 @@ func Test_cleanupDeltaForResourcesAndClustersBackup(t *testing.T) {
 			resourcesToBeDeleted: []unstructured.Unstructured{
 				*channel_with_backup_label_diff,
 				*channel_with_backup_label_generic_old,
-				*channel_with_backup_label_generic, // it's deleted bc the backup name doesn't match the generic backup
+				*channel_with_backup_label_generic,
 			},
 			resourcesToKeep: []unstructured.Unstructured{
 				*channel_with_no_backup_label,
@@ -2169,7 +1785,7 @@ func Test_cleanupDeltaForResourcesAndClustersBackup(t *testing.T) {
 			},
 			extraBackups: []veleroapi.Backup{genericBackup},
 			resourcesToCreate: []unstructured.Unstructured{
-				*channel_with_backup_label_diff, // this is the one deleted by the previous test, add it back
+				*channel_with_backup_label_diff,
 			},
 		},
 		{
@@ -2191,8 +1807,8 @@ func Test_cleanupDeltaForResourcesAndClustersBackup(t *testing.T) {
 			resourcesToBeDeleted: []unstructured.Unstructured{
 				*channel_with_backup_label_diff,
 				*channel_with_backup_label_generic_old,
-				*channel_with_backup_label_generic,           // it's deleted bc the backup name doesn't match the generic backup
-				*channel_with_backup_label_generic_old_activ, // deleted bc the clusters backup is enabled
+				*channel_with_backup_label_generic,
+				*channel_with_backup_label_generic_old_activ,
 			},
 			resourcesToKeep: []unstructured.Unstructured{
 				*channel_with_no_backup_label,
@@ -2202,7 +1818,7 @@ func Test_cleanupDeltaForResourcesAndClustersBackup(t *testing.T) {
 				*channel_with_backup_label_generic_match_activ,
 			},
 			extraBackups: []veleroapi.Backup{},
-			resourcesToCreate: []unstructured.Unstructured{ // this is the one deleted by the previous test, add it back
+			resourcesToCreate: []unstructured.Unstructured{
 				*channel_with_backup_label_diff,
 			},
 		},
@@ -2225,9 +1841,9 @@ func Test_cleanupDeltaForResourcesAndClustersBackup(t *testing.T) {
 			resourcesToBeDeleted: []unstructured.Unstructured{
 				*channel_with_backup_label_diff,
 				*channel_with_backup_label_generic_old,
-				*channel_with_backup_label_generic,           // it's deleted bc the backup name doesn't match the generic backup
-				*channel_with_backup_label_generic_old_activ, // deleted bc the clusters backup is enabled
-				*channel_with_no_backup_label,                // delete all, even the ones with no label
+				*channel_with_backup_label_generic,
+				*channel_with_backup_label_generic_old_activ,
+				*channel_with_no_backup_label,
 			},
 			resourcesToKeep: []unstructured.Unstructured{
 				*channel_with_backup_label_same,
@@ -2236,22 +1852,169 @@ func Test_cleanupDeltaForResourcesAndClustersBackup(t *testing.T) {
 				*channel_with_backup_label_generic_match_activ,
 			},
 			extraBackups: []veleroapi.Backup{},
-			resourcesToCreate: []unstructured.Unstructured{ // this is the one deleted by the previous test, add it back
+			resourcesToCreate: []unstructured.Unstructured{
 				*channel_with_backup_label_diff,
-				*channel_with_backup_label_generic_old,
-				*channel_with_backup_label_generic,           // it's deleted bc the backup name doesn't match the generic backup
-				*channel_with_backup_label_generic_old_activ, // deleted bc the clusters backup is enabled
 			},
 		},
 	}
 
-	testsClusters := []struct {
+	// Run the test cases
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create backup objects if needed
+			for i := range tt.extraBackups {
+				tt.extraBackups[i].ResourceVersion = ""
+				_ = k8sClient1.Delete(tt.args.ctx, &tt.extraBackups[i])
+				_ = k8sClient1.Create(tt.args.ctx, &tt.extraBackups[i])
+			}
+
+			// Create Velero Restore and Backup objects that the function expects to find
+			if tt.args.acmRestore.Status.VeleroResourcesRestoreName != "" {
+				veleroRestore := &veleroapi.Restore{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      tt.args.acmRestore.Status.VeleroResourcesRestoreName,
+						Namespace: tt.args.acmRestore.Namespace,
+					},
+					Spec: veleroapi.RestoreSpec{
+						BackupName: tt.args.veleroBackup.Name,
+					},
+				}
+				_ = k8sClient1.Create(tt.args.ctx, veleroRestore)
+
+				// Create the corresponding backup
+				tt.args.veleroBackup.ResourceVersion = ""
+				_ = k8sClient1.Create(tt.args.ctx, tt.args.veleroBackup)
+			}
+
+			if tt.args.acmRestore.Status.VeleroGenericResourcesRestoreName != "" {
+				// Create generic restore if it's different from resources restore
+				if tt.args.acmRestore.Status.VeleroGenericResourcesRestoreName != tt.args.acmRestore.Status.VeleroResourcesRestoreName {
+					veleroGenericRestore := &veleroapi.Restore{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      tt.args.acmRestore.Status.VeleroGenericResourcesRestoreName,
+							Namespace: tt.args.acmRestore.Namespace,
+						},
+						Spec: veleroapi.RestoreSpec{
+							BackupName: tt.args.acmRestore.Status.VeleroGenericResourcesRestoreName,
+						},
+					}
+					_ = k8sClient1.Create(tt.args.ctx, veleroGenericRestore)
+				}
+			}
+
+			// Create extra resources if needed
+			for i := range tt.resourcesToCreate {
+				_, err := dyn.Resource(chGVKList).Namespace("default").Create(context.Background(),
+					&tt.resourcesToCreate[i], metav1.CreateOptions{})
+				if client.IgnoreAlreadyExists(err) != nil {
+					t.Errorf("Error creating resource: %s", err.Error())
+				}
+			}
+
+			// Create resources that should exist
+			createTestChannelResources(t, dyn, chGVKList, tt.resourcesToKeep)
+			createTestChannelResources(t, dyn, chGVKList, tt.resourcesToBeDeleted)
+
+			// Execute the function under test
+			cleanupDeltaForResourcesBackup(tt.args.ctx, tt.args.c, tt.args.restoreOptions,
+				tt.args.acmRestore)
+
+			// Verify results
+			verifyResourcesDeleted(t, dyn, chGVKList, tt.resourcesToBeDeleted)
+			verifyResourcesKept(t, dyn, chGVKList, tt.resourcesToKeep)
+		})
+	}
+}
+
+func Test_cleanupDeltaForClustersBackup(t *testing.T) {
+	log.SetLogger(zap.New())
+
+	// Use helper function for scheme setup
+	scheme1, err := setupTestScheme()
+	AssertNoError(t, err, "Error setting up test scheme")
+
+	// Use helper function for backup setup
+	backupSetup := createTestBackupSetup()
+
+	// Use the pre-configured backup objects
+	clustersBackup := backupSetup.ClustersBackup
+
+	clusterNamespace := backupSetup.ClusterNamespace
+	namespaceName := backupSetup.NamespaceName
+	veleroClustersBackupName := backupSetup.VeleroClustersBackupName
+
+	// Use helper functions for ManagedCluster creation
+	cls_with_backup_label_same := withBackupLabel(
+		createManagedClusterUnstructured("cls-with-backup-label-same", "default"),
+		clustersBackup.Name)
+	cls_with_backup_label_diff_excl_ns := withBackupLabel(
+		createManagedClusterUnstructured("cls-with-backup-label-diff-excl-ns", "local-cluster"),
+		backupSetup.VeleroClustersBackupNameOlder)
+	cls_with_backup_label_diff := withFinalizers(withBackupLabel(
+		createManagedClusterUnstructured("channel-with-backup-label-diff", "default"),
+		backupSetup.VeleroClustersBackupNameOlder),
+		[]string{"hive.openshift.io/deprovision"})
+	cls_with_no_backup_label := createManagedClusterUnstructured("cls-with-no-backup-label", "default")
+	msaObj := createMSAUnstructured("auto-import-account", clusterNamespace)
+
+	// Setup test infrastructure
+	server1 := setupMockDiscoveryServer(t)
+	defer server1.Close()
+
+	fakeDiscovery := discoveryclient.NewDiscoveryClientForConfigOrDie(
+		&restclient.Config{Host: server1.URL},
+	)
+
+	k8sClient1 := fake.NewClientBuilder().
+		WithScheme(scheme1).
+		Build()
+
+	// Define custom list kinds for the dynamic client
+	listKinds := map[schema.GroupVersionResource]string{
+		{Group: "cluster.open-cluster-management.io", Version: "v1beta1", Resource: "managedclusters"}:               "ManagedClusterList",
+		{Group: "authentication.open-cluster-management.io", Version: "v1beta1", Resource: "managedserviceaccounts"}: "ManagedServiceAccountList",
+	}
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme1, listKinds)
+
+	// Setup GVK and GVR for managed clusters
+	clsGVKList := schema.GroupVersionResource{
+		Group:   "cluster.open-cluster-management.io",
+		Version: "v1beta1", Resource: "managedclusters",
+	}
+	msaGVRList := schema.GroupVersionResource{
+		Group:   "authentication.open-cluster-management.io",
+		Version: "v1beta1", Resource: "managedserviceaccounts",
+	}
+
+	reconcileArgs := DynamicStruct{
+		dc:  fakeDiscovery,
+		dyn: dyn,
+	}
+
+	m := restmapper.NewDeferredDiscoveryRESTMapper(
+		memory.NewMemCacheClient(fakeDiscovery),
+	)
+
+	resOptionsCleanupRestored := RestoreOptions{
+		dynamicArgs: reconcileArgs,
+		cleanupType: v1beta1.CleanupTypeRestored,
+		mapper:      m,
+	}
+
+	type args struct {
+		ctx            context.Context
+		c              client.Client
+		restoreOptions RestoreOptions
+		acmRestore     *v1beta1.Restore
+		veleroBackup   *veleroapi.Backup
+		backupName     string
+	}
+
+	tests := []struct {
 		name                 string
 		args                 args
 		resourcesToBeDeleted []unstructured.Unstructured
 		resourcesToKeep      []unstructured.Unstructured
-		extraBackups         []veleroapi.Backup
-		resourcesToCreate    []unstructured.Unstructured
 	}{
 		{
 			name: "cleanup clusters backup",
@@ -2261,170 +2024,190 @@ func Test_cleanupDeltaForResourcesAndClustersBackup(t *testing.T) {
 				restoreOptions: resOptionsCleanupRestored,
 				veleroBackup:   &clustersBackup,
 				backupName:     veleroClustersBackupName,
-				acmRestore: createACMRestore("acm-restore", namespaceName).
+				acmRestore: createACMRestore("restore-"+veleroClustersBackupName, namespaceName).
 					veleroManagedClustersBackupName(veleroClustersBackupName).
 					restoreACMStatus(v1beta1.RestoreStatus{
-						VeleroResourcesRestoreName: veleroClustersBackupName,
+						VeleroManagedClustersRestoreName: veleroClustersBackupName,
 					}).
 					object,
 			},
 			resourcesToBeDeleted: []unstructured.Unstructured{*cls_with_backup_label_diff},
 			resourcesToKeep: []unstructured.Unstructured{
-				*cls_with_no_backup_label,
 				*cls_with_backup_label_same,
 				*cls_with_backup_label_diff_excl_ns,
+				*cls_with_no_backup_label,
 			},
-			extraBackups:      []veleroapi.Backup{clustersBackupOld},
-			resourcesToCreate: []unstructured.Unstructured{},
 		},
 	}
 
-	if err := k8sClient1.Create(context.Background(), createNamespace(genericBackup.GetNamespace())); err != nil {
-		t.Fatalf("cannot create ns %s ", err.Error())
-	}
-
-	mapper := restmapper.NewDeferredDiscoveryRESTMapper(
-		memory.NewMemCacheClient(resOptionsCleanupRestored.dynamicArgs.dc),
-	)
-
-	// create restore resources
-	////////
-	createRestores := []veleroapi.Restore{
-		*createRestore(veleroResourcesBackupName, namespaceName).
-			backupName(veleroResourcesBackupName).object,
-		*createRestore(veleroClustersBackupNameOlder, namespaceName).
-			backupName(veleroClustersBackupNameOlder).object,
-		*createRestore(veleroClustersBackupName, namespaceName).
-			backupName(veleroClustersBackupName).object,
-		*createRestore(veleroGenericBackupName, namespaceName).
-			backupName(veleroGenericBackupName).object,
-		*createRestore(veleroResourcesBackupNameOlder, namespaceName).
-			backupName(veleroResourcesBackupNameOlder).object,
-	}
-	for i := range createRestores {
-		if err := k8sClient1.Create(context.Background(), &createRestores[i]); err != nil {
-			t.Fatalf("cannot create restore %s ", err.Error())
-		}
-	}
-	////////
-
-	for _, tt := range testsResources {
-		// Clear resourceVersion before creating backup
-		tt.args.veleroBackup.ResourceVersion = ""
-		// Delete backup if it already exists, then create it
-		_ = k8sClient1.Delete(tt.args.ctx, tt.args.veleroBackup)
-		_ = k8sClient1.Create(tt.args.ctx, tt.args.veleroBackup)
-
-		// create extra backups for this test
-		for i := range tt.extraBackups {
-			// Clear resourceVersion before creating backup
-			tt.extraBackups[i].ResourceVersion = ""
-			// Delete backup if it already exists, then create it
-			_ = k8sClient1.Delete(tt.args.ctx, &tt.extraBackups[i])
-			if err := k8sClient1.Create(tt.args.ctx, &tt.extraBackups[i]); err != nil {
-				t.Errorf("cannot create backup %s ", err.Error())
-			}
-		}
-
-		// create resources for this test
-		for i := range tt.resourcesToCreate {
-			if _, err := dyn.Resource(chGVKList).Namespace(tt.resourcesToCreate[i].GetNamespace()).Create(context.Background(),
-				&tt.resourcesToCreate[i], metav1.CreateOptions{}); err != nil {
-				t.Errorf("cannot create resource %s ", err.Error())
-			}
-		}
-
+	// Run the test cases
+	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cleanupDeltaForResourcesBackup(tt.args.ctx,
-				tt.args.c,
-				tt.args.restoreOptions,
-				tt.args.acmRestore)
+			// Create MSA object
+			_, err := dyn.Resource(msaGVRList).Namespace(clusterNamespace).Create(context.Background(),
+				msaObj, metav1.CreateOptions{})
+			if err != nil {
+				t.Fatalf("Error creating MSA: %s", err.Error())
+			}
+
+			// Create cluster resources
+			createTestClusterResources(t, dyn, clsGVKList, tt.resourcesToKeep)
+			createTestClusterResources(t, dyn, clsGVKList, tt.resourcesToBeDeleted)
+
+			// Execute the function under test
+			cleanupDeltaForClustersBackup(tt.args.ctx, tt.args.c, tt.args.restoreOptions,
+				tt.args.backupName, tt.args.veleroBackup)
+
+			// Verify results
+			verifyResourcesDeleted(t, dyn, clsGVKList, tt.resourcesToBeDeleted)
+			verifyResourcesKept(t, dyn, clsGVKList, tt.resourcesToKeep)
 		})
+	}
+}
 
-		groupKind := schema.GroupKind{
-			Group: chGVK.Group,
-			Kind:  chGVK.Kind,
-		}
+// Helper functions for the split tests
 
-		mapping, _ := mapper.RESTMapping(groupKind, "")
-		dr := tt.args.restoreOptions.dynamicArgs.dyn.Resource(mapping.Resource)
-
-		for i := range tt.resourcesToBeDeleted {
-			if _, err := dr.Namespace(tt.resourcesToBeDeleted[i].GetNamespace()).
-				Get(tt.args.ctx, tt.resourcesToBeDeleted[i].GetName(), metav1.GetOptions{}); err == nil {
-				t.Errorf("cleanupDeltaForResourcesBackup(%s) resource %s should NOT be found",
-					tt.name, tt.resourcesToBeDeleted[i])
-			}
-		}
-
-		for i := range tt.resourcesToKeep {
-			if _, err := dr.Namespace(tt.resourcesToKeep[i].GetNamespace()).
-				Get(tt.args.ctx, tt.resourcesToKeep[i].GetName(), metav1.GetOptions{}); err != nil {
-				t.Errorf("cleanupDeltaForResourcesBackup(%s) resource %s should be found ! they were deleted",
-					tt.name, tt.resourcesToKeep[i].GetName())
-			}
-		}
-
+func setupMockDiscoveryServer(t *testing.T) *httptest.Server {
+	// Define API resource lists
+	appsInfo := metav1.APIResourceList{
+		GroupVersion: "apps.open-cluster-management.io/v1beta1",
+		APIResources: []metav1.APIResource{
+			{Name: "channels", Namespaced: true, Kind: "Channel"},
+			{Name: "subscriptions", Namespaced: true, Kind: "Subscription"},
+		},
+	}
+	appsInfoV1 := metav1.APIResourceList{
+		GroupVersion: "apps.open-cluster-management.io/v1",
+		APIResources: []metav1.APIResource{
+			{Name: "channels", Namespaced: true, Kind: "Channel"},
+			{Name: "subscriptions", Namespaced: true, Kind: "Subscription"},
+		},
+	}
+	clusterInfo := metav1.APIResourceList{
+		GroupVersion: "cluster.open-cluster-management.io/v1beta1",
+		APIResources: []metav1.APIResource{
+			{Name: "managedclusters", Namespaced: true, Kind: "ManagedCluster"},
+		},
+	}
+	authInfo := metav1.APIResourceList{
+		GroupVersion: "authentication.open-cluster-management.io/v1beta1",
+		APIResources: []metav1.APIResource{
+			{Name: "managedserviceaccounts", Namespaced: true, Kind: "ManagedServiceAccount"},
+		},
 	}
 
-	for _, tt := range testsClusters {
-		// Clear resourceVersion before creating backup
-		tt.args.veleroBackup.ResourceVersion = ""
-		// Delete backup if it already exists, then create it
-		_ = k8sClient1.Delete(tt.args.ctx, tt.args.veleroBackup)
-		if err := k8sClient1.Create(tt.args.ctx, tt.args.veleroBackup); err != nil {
-			t.Errorf("Error creating veleroBackup: %s", err.Error())
-		}
-		// create extra backups for this test
-		for i := range tt.extraBackups {
-			// Clear resourceVersion before creating backup
-			tt.extraBackups[i].ResourceVersion = ""
-			// Delete backup if it already exists, then create it
-			_ = k8sClient1.Delete(tt.args.ctx, &tt.extraBackups[i])
-			if err := k8sClient1.Create(tt.args.ctx, &tt.extraBackups[i]); err != nil {
-				t.Errorf("cannot create backup %s ", err.Error())
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		var list interface{}
+		switch req.URL.Path {
+		case "/apis/apps.open-cluster-management.io/v1beta1":
+			list = &appsInfo
+		case "/apis/apps.open-cluster-management.io/v1":
+			list = &appsInfoV1
+		case "/apis/cluster.open-cluster-management.io/v1beta1":
+			list = &clusterInfo
+		case "/apis/authentication.open-cluster-management.io/v1beta1":
+			list = &authInfo
+		case "/api":
+			list = &metav1.APIVersions{
+				Versions: []string{
+					"v1",
+				},
 			}
-		}
-
-		// create resources for this test
-		for i := range tt.resourcesToCreate {
-			if _, err := dyn.Resource(chGVKList).Namespace(tt.resourcesToCreate[i].GetNamespace()).Create(context.Background(),
-				&tt.resourcesToCreate[i], metav1.CreateOptions{}); err != nil {
-				t.Errorf("cannot create resource %s ", err.Error())
+		case "/apis":
+			list = &metav1.APIGroupList{
+				Groups: []metav1.APIGroup{
+					{
+						Name: "cluster.open-cluster-management.io",
+						Versions: []metav1.GroupVersionForDiscovery{
+							{GroupVersion: "cluster.open-cluster-management.io/v1beta1", Version: "v1beta1"},
+							{GroupVersion: "cluster.open-cluster-management.io/v1", Version: "v1"},
+						},
+					},
+					{
+						Name: "apps.open-cluster-management.io",
+						Versions: []metav1.GroupVersionForDiscovery{
+							{GroupVersion: "apps.open-cluster-management.io/v1beta1", Version: "v1beta1"},
+							{GroupVersion: "apps.open-cluster-management.io/v1", Version: "v1"},
+						},
+					},
+					{
+						Name: "authentication.open-cluster-management.io",
+						Versions: []metav1.GroupVersionForDiscovery{
+							{GroupVersion: "authentication.open-cluster-management.io/v1beta1", Version: "v1beta1"},
+						},
+					},
+				},
 			}
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			return
 		}
-
-		t.Run(tt.name, func(t *testing.T) {
-			cleanupDeltaForClustersBackup(tt.args.ctx,
-				tt.args.c,
-				tt.args.restoreOptions,
-				tt.args.backupName,
-				tt.args.veleroBackup)
-		})
-
-		// managed cluster group
-		groupKind := schema.GroupKind{
-			Group: clsGVK.Group,
-			Kind:  clsGVK.Kind,
+		output, err := json.Marshal(list)
+		if err != nil {
+			t.Errorf("unexpected encoding error: %v", err)
+			return
 		}
-		mapping, _ := mapper.RESTMapping(groupKind, "")
-		dr := tt.args.restoreOptions.dynamicArgs.dyn.Resource(mapping.Resource)
-
-		for i := range tt.resourcesToBeDeleted {
-			if _, err := dr.Namespace(tt.resourcesToBeDeleted[i].GetNamespace()).
-				Get(tt.args.ctx, tt.resourcesToBeDeleted[i].GetName(), metav1.GetOptions{}); err == nil {
-				t.Errorf("cleanupDeltaForClustersBackup(%s) resource %s should NOT be found",
-					tt.name, tt.resourcesToBeDeleted[i])
-			}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, err = w.Write(output)
+		if err != nil {
+			t.Errorf("unexpected write error: %v", err)
 		}
+	}))
+}
 
-		for i := range tt.resourcesToKeep {
-			if _, err := dr.Namespace(tt.resourcesToKeep[i].GetNamespace()).
-				Get(tt.args.ctx, tt.resourcesToKeep[i].GetName(), metav1.GetOptions{}); err != nil {
-				t.Errorf("cleanupDeltaForClustersBackup(%s) resource %s should be found ! they were deleted",
-					tt.name, tt.resourcesToKeep[i].GetName())
-			}
+func createTestChannelResources(t *testing.T, dyn dynamic.Interface, gvr schema.GroupVersionResource, resources []unstructured.Unstructured) {
+	for i := range resources {
+		namespace := resources[i].GetNamespace()
+		if namespace == "" {
+			namespace = "default"
 		}
+		_, err := dyn.Resource(gvr).Namespace(namespace).Create(context.Background(),
+			&resources[i], metav1.CreateOptions{})
+		if client.IgnoreAlreadyExists(err) != nil {
+			t.Errorf("Error creating channel resource: %s", err.Error())
+		}
+	}
+}
 
+func createTestClusterResources(t *testing.T, dyn dynamic.Interface, gvr schema.GroupVersionResource, resources []unstructured.Unstructured) {
+	for i := range resources {
+		namespace := resources[i].GetNamespace()
+		if namespace == "" {
+			namespace = "default"
+		}
+		_, err := dyn.Resource(gvr).Namespace(namespace).Create(context.Background(),
+			&resources[i], metav1.CreateOptions{})
+		if err != nil {
+			t.Errorf("Error creating cluster resource: %s", err.Error())
+		}
+	}
+}
+
+func verifyResourcesDeleted(t *testing.T, dyn dynamic.Interface, gvr schema.GroupVersionResource, resources []unstructured.Unstructured) {
+	for i := range resources {
+		namespace := resources[i].GetNamespace()
+		if namespace == "" {
+			namespace = "default"
+		}
+		name := resources[i].GetName()
+		_, err := dyn.Resource(gvr).Namespace(namespace).Get(context.Background(), name, metav1.GetOptions{})
+		if err == nil {
+			t.Errorf("Expected resource %s/%s to be deleted, but it still exists", namespace, name)
+		}
+	}
+}
+
+func verifyResourcesKept(t *testing.T, dyn dynamic.Interface, gvr schema.GroupVersionResource, resources []unstructured.Unstructured) {
+	for i := range resources {
+		namespace := resources[i].GetNamespace()
+		if namespace == "" {
+			namespace = "default"
+		}
+		name := resources[i].GetName()
+		_, err := dyn.Resource(gvr).Namespace(namespace).Get(context.Background(), name, metav1.GetOptions{})
+		if err != nil {
+			t.Errorf("Expected resource %s/%s to be kept, but it was deleted: %v", namespace, name, err)
+		}
 	}
 }
