@@ -44,56 +44,151 @@ import (
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 )
 
+// Test helper functions to reduce code duplication
+
+// setupTestLogger configures the logger for tests
+func setupTestLogger() {
+	log.SetLogger(zap.New(zap.UseDevMode(true)))
+}
+
+// createTestContext returns a background context for tests
+func createTestContext() context.Context {
+	return context.Background()
+}
+
+// createBasicScheme creates a scheme with core APIs
+func createBasicScheme() *runtime.Scheme {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		panic("Error adding corev1 to scheme: " + err.Error())
+	}
+	return scheme
+}
+
+// createWorkScheme creates a scheme with core and work APIs
+func createWorkScheme() *runtime.Scheme {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		panic("Error adding corev1 to scheme: " + err.Error())
+	}
+	if err := workv1.AddToScheme(scheme); err != nil {
+		panic("Error adding workv1 to scheme: " + err.Error())
+	}
+	return scheme
+}
+
+// createFullScheme creates a scheme with all required APIs
+func createFullScheme() *runtime.Scheme {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		panic("Error adding corev1 to scheme: " + err.Error())
+	}
+	if err := workv1.AddToScheme(scheme); err != nil {
+		panic("Error adding workv1 to scheme: " + err.Error())
+	}
+	if err := clusterv1.AddToScheme(scheme); err != nil {
+		panic("Error adding clusterv1 to scheme: " + err.Error())
+	}
+	if err := addonv1alpha1.AddToScheme(scheme); err != nil {
+		panic("Error adding addonv1alpha1 to scheme: " + err.Error())
+	}
+	return scheme
+}
+
+// createTestNamespace creates a namespace for testing
+func createTestNamespace(name string) *corev1.Namespace {
+	return &corev1.Namespace{
+		ObjectMeta: v1.ObjectMeta{
+			Name: name,
+		},
+	}
+}
+
+// createTestSecret creates a secret with optional labels and annotations
+func createTestSecret(name, namespace string, labels, annotations map[string]string) *corev1.Secret {
+	return &corev1.Secret{
+		ObjectMeta: v1.ObjectMeta{
+			Name:        name,
+			Namespace:   namespace,
+			Labels:      labels,
+			Annotations: annotations,
+		},
+	}
+}
+
+// createMSASecret creates a secret with MSA labels
+func createMSASecret(name, namespace string, annotations map[string]string) *corev1.Secret {
+	labels := map[string]string{
+		msa_label: "true",
+	}
+	return createTestSecret(name, namespace, labels, annotations)
+}
+
+// createTestManifestWork creates a ManifestWork for testing
+func createTestManifestWork(name, namespace string, labels map[string]string) *workv1.ManifestWork {
+	return &workv1.ManifestWork{
+		ObjectMeta: v1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+			Labels:    labels,
+		},
+	}
+}
+
+// createFakeClient creates a fake client with the given scheme and objects
+func createFakeClient(scheme *runtime.Scheme, objects ...client.Object) client.Client {
+	return fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(objects...).
+		Build()
+}
+
+// createTestManagedCluster creates a ManagedCluster for testing
+func createTestManagedCluster(name string, isLocal bool) *clusterv1.ManagedCluster {
+	cluster := &clusterv1.ManagedCluster{
+		ObjectMeta: v1.ObjectMeta{
+			Name: name,
+		},
+	}
+	if isLocal {
+		cluster.Labels = map[string]string{
+			"local-cluster": "true",
+		}
+	}
+	return cluster
+}
+
+// parseTestTime parses a test timestamp
+func parseTestTime(timeStr string) time.Time {
+	t, err := time.Parse(time.RFC3339, timeStr)
+	if err != nil {
+		panic("Error parsing test time: " + err.Error())
+	}
+	return t
+}
+
 func Test_createMSA(t *testing.T) {
 	// Set up logger
-	log.SetLogger(zap.New(zap.UseDevMode(true)))
-	ctx := context.Background()
+	setupTestLogger()
+	ctx := createTestContext()
 
 	namespace := "managed1"
 
-	// Create scheme and fake client
-	scheme := runtime.NewScheme()
-	if err := corev1.AddToScheme(scheme); err != nil {
-		t.Fatalf("Error adding core apis to scheme: %s", err.Error())
-	}
-	if err := workv1.AddToScheme(scheme); err != nil {
-		t.Fatalf("Error adding workv1 apis to scheme: %s", err.Error())
-	}
+	// Create scheme with workv1 for ManifestWork objects
+	scheme := createWorkScheme()
 
 	// Create test namespace
-	testNamespace := &corev1.Namespace{
-		ObjectMeta: v1.ObjectMeta{
-			Name: namespace,
-		},
-	}
+	testNamespace := createTestNamespace(namespace)
 
 	// Create test secret
-	testSecret := &corev1.Secret{
-		ObjectMeta: v1.ObjectMeta{
-			Name:      msa_service_name,
-			Namespace: namespace,
-		},
-	}
+	testSecret := createTestSecret(msa_service_name, namespace, nil, nil)
 
 	// Create test ManifestWorks
-	mwork1 := &workv1.ManifestWork{
-		ObjectMeta: v1.ObjectMeta{
-			Name:      manifest_work_name + mwork_custom_282,
-			Namespace: namespace,
-		},
-	}
+	mwork1 := createTestManifestWork(manifest_work_name+mwork_custom_282, namespace, nil)
 
-	mwork2 := &workv1.ManifestWork{
-		ObjectMeta: v1.ObjectMeta{
-			Name:      manifest_work_name_pair + mwork_custom_282,
-			Namespace: namespace,
-		},
-	}
+	mwork2 := createTestManifestWork(manifest_work_name_pair+mwork_custom_282, namespace, nil)
 
-	k8sClient := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithObjects(testNamespace, testSecret, mwork1, mwork2).
-		Build()
+	k8sClient := createFakeClient(scheme, testNamespace, testSecret, mwork1, mwork2)
 
 	current, _ := time.Parse(time.RFC3339, "2022-07-26T15:25:34Z")
 
@@ -827,23 +922,11 @@ func Test_shouldGeneratePairToken(t *testing.T) {
 
 func Test_cleanupMSAForImportedClusters(t *testing.T) {
 	// Set up logger
-	log.SetLogger(zap.New(zap.UseDevMode(true)))
-	ctx := context.Background()
+	setupTestLogger()
+	ctx := createTestContext()
 
 	// Create scheme
-	scheme := runtime.NewScheme()
-	if err := clusterv1.AddToScheme(scheme); err != nil {
-		t.Fatalf("Error adding clusterv1 apis to scheme: %s", err.Error())
-	}
-	if err := workv1.AddToScheme(scheme); err != nil {
-		t.Fatalf("Error adding workv1 apis to scheme: %s", err.Error())
-	}
-	if err := corev1.AddToScheme(scheme); err != nil {
-		t.Fatalf("Error adding corev1 apis to scheme: %s", err.Error())
-	}
-	if err := addonv1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatalf("Error adding addonv1alpha1 apis to scheme: %s", err.Error())
-	}
+	scheme := createFullScheme()
 
 	backupNS := "velero-ns"
 	backupSchedule := &v1beta1.BackupSchedule{
@@ -854,34 +937,17 @@ func Test_cleanupMSAForImportedClusters(t *testing.T) {
 	}
 
 	// Create test namespaces
-	ns1 := &corev1.Namespace{
-		ObjectMeta: v1.ObjectMeta{Name: "managed1"},
-	}
-	nsHive := &corev1.Namespace{
-		ObjectMeta: v1.ObjectMeta{Name: "managed2-hive"},
-	}
-	nsLocal := &corev1.Namespace{
-		ObjectMeta: v1.ObjectMeta{Name: "loc"},
-	}
+	ns1 := createTestNamespace("managed1")
+	nsHive := createTestNamespace("managed2-hive")
+	nsLocal := createTestNamespace("loc")
 
 	// Create test managed clusters
-	managedCluster1 := &clusterv1.ManagedCluster{
-		ObjectMeta: v1.ObjectMeta{Name: "managed1"},
-	}
+	managedCluster1 := createTestManagedCluster("managed1", false)
 
-	managedClusterHive := &clusterv1.ManagedCluster{
-		ObjectMeta: v1.ObjectMeta{Name: "managed2-hive"},
-	}
+	managedClusterHive := createTestManagedCluster("managed2-hive", false)
 
 	// Local cluster with proper label
-	managedClusterLocal := &clusterv1.ManagedCluster{
-		ObjectMeta: v1.ObjectMeta{
-			Name: "loc",
-			Labels: map[string]string{
-				"local-cluster": "true",
-			},
-		},
-	}
+	managedClusterLocal := createTestManagedCluster("loc", true)
 
 	// Create hive secret (indicates this is a hive cluster)
 	hiveSecret := &corev1.Secret{
@@ -894,10 +960,7 @@ func Test_cleanupMSAForImportedClusters(t *testing.T) {
 		},
 	}
 
-	k8sClient := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithObjects(ns1, nsHive, nsLocal, managedCluster1, managedClusterHive, managedClusterLocal, hiveSecret).
-		Build()
+	k8sClient := createFakeClient(scheme, ns1, nsHive, nsLocal, managedCluster1, managedClusterHive, managedClusterLocal, hiveSecret)
 
 	// Create fake dynamic client with MSA object
 	obj1 := &unstructured.Unstructured{}
@@ -1029,71 +1092,30 @@ func Test_cleanupMSAForImportedClusters(t *testing.T) {
 
 func Test_updateSecretsLabels(t *testing.T) {
 	// Set up logger
-	log.SetLogger(zap.New(zap.UseDevMode(true)))
-	ctx := context.Background()
+	setupTestLogger()
+	ctx := createTestContext()
 
 	labelName := backupCredsClusterLabel
 	labelValue := "clusterpool"
 	clsName := "managed1"
 
 	// Create test namespace
-	namespace := &corev1.Namespace{
-		ObjectMeta: v1.ObjectMeta{
-			Name: clsName,
-		},
-	}
+	namespace := createTestNamespace(clsName)
 
 	// Create test secrets
-	importSecret := &corev1.Secret{
-		ObjectMeta: v1.ObjectMeta{
-			Name:      clsName + "-import", // Should NOT be backed up (import secrets are excluded)
-			Namespace: clsName,
-			Labels: map[string]string{
-				labelName: labelValue, // Already has label, should be removed
-			},
-		},
-	}
+	importSecret := createTestSecret(clsName+"-import", clsName, nil, nil)
 
-	importSecret1 := &corev1.Secret{
-		ObjectMeta: v1.ObjectMeta{
-			Name:      clsName + "-import-1", // Should be backed up (not exact import name)
-			Namespace: clsName,
-			Labels: map[string]string{
-				labelName: labelValue, // Already has label, should keep it
-			},
-		},
-	}
+	importSecret1 := createTestSecret(clsName+"-import-1", clsName, nil, nil)
 
-	importSecret2 := &corev1.Secret{
-		ObjectMeta: v1.ObjectMeta{
-			Name:      clsName + "-import-2", // Should be backed up (no existing label)
-			Namespace: clsName,
-		},
-	}
+	importSecret2 := createTestSecret(clsName+"-import-2", clsName, nil, nil)
 
-	bootstrapSecret := &corev1.Secret{
-		ObjectMeta: v1.ObjectMeta{
-			Name:      clsName + "-bootstrap-test", // Should NOT be backed up (bootstrap secrets are excluded)
-			Namespace: clsName,
-		},
-	}
+	bootstrapSecret := createTestSecret(clsName+"-bootstrap-test", clsName, nil, nil)
 
-	otherSecret := &corev1.Secret{
-		ObjectMeta: v1.ObjectMeta{
-			Name:      clsName + "-some-other-secret-test", // Should be backed up
-			Namespace: clsName,
-		},
-	}
+	otherSecret := createTestSecret(clsName+"-some-other-secret-test", clsName, nil, nil)
 
-	scheme := runtime.NewScheme()
-	if err := corev1.AddToScheme(scheme); err != nil {
-		t.Fatalf("Error adding corev1 to scheme: %s", err.Error())
-	}
+	scheme := createBasicScheme()
 
-	k8sClient := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithObjects(namespace, importSecret, importSecret1, importSecret2, bootstrapSecret, otherSecret).
-		Build()
+	k8sClient := createFakeClient(scheme, namespace, importSecret, importSecret1, importSecret2, bootstrapSecret, otherSecret)
 
 	hiveSecrets := corev1.SecretList{
 		Items: []corev1.Secret{
@@ -1258,17 +1280,14 @@ func Test_retrieveMSAImportSecrets(t *testing.T) {
 
 func Test_updateMSAResources(t *testing.T) {
 	// Set up test logger
-	log.SetLogger(zap.New(zap.UseDevMode(true)))
-	ctx := context.Background()
+	setupTestLogger()
+	ctx := createTestContext()
 
 	// Test namespace
 	namespace := "msa-test-ns"
 
 	// Create scheme
-	scheme1 := runtime.NewScheme()
-	if err := corev1.AddToScheme(scheme1); err != nil {
-		t.Fatalf("Error adding core apis to scheme: %s", err.Error())
-	}
+	scheme1 := createBasicScheme()
 
 	// Create test secrets that should be processed by updateMSAResources
 	// Secret 1: MSA secret without backup label (should be processed)
@@ -1329,9 +1348,7 @@ func Test_updateMSAResources(t *testing.T) {
 	}
 
 	// Create fake client with the test secrets
-	k8sClient1 := fake.NewClientBuilder().WithScheme(scheme1).WithObjects(
-		msaSecret1, msaSecret2, msaSecret3, nonMsaSecret,
-	).Build()
+	k8sClient1 := createFakeClient(scheme1, msaSecret1, msaSecret2, msaSecret3, nonMsaSecret)
 
 	// Create fake dynamic client with MSA resources that have status information
 	msaResource1 := &unstructured.Unstructured{}
@@ -1551,8 +1568,8 @@ func Test_updateMSAResources(t *testing.T) {
 
 func Test_deleteCustomManifestWork(t *testing.T) {
 	// Set up logger
-	log.SetLogger(zap.New(zap.UseDevMode(true)))
-	ctx := context.Background()
+	setupTestLogger()
+	ctx := createTestContext()
 
 	// Create a fake client with a ManifestWork that should be deleted
 	manifestWork := &workv1.ManifestWork{
@@ -1562,15 +1579,9 @@ func Test_deleteCustomManifestWork(t *testing.T) {
 		},
 	}
 
-	scheme := runtime.NewScheme()
-	if err := workv1.AddToScheme(scheme); err != nil {
-		t.Fatalf("Error adding workv1 to scheme: %s", err.Error())
-	}
+	scheme := createWorkScheme()
 
-	k8sClient := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithObjects(manifestWork).
-		Build()
+	k8sClient := createFakeClient(scheme, manifestWork)
 
 	type args struct {
 		ctx       context.Context
@@ -1629,13 +1640,10 @@ func Test_deleteCustomManifestWork(t *testing.T) {
 
 func Test_createManifestWork(t *testing.T) {
 	// Set up logger
-	log.SetLogger(zap.New(zap.UseDevMode(true)))
-	ctx := context.Background()
+	setupTestLogger()
+	ctx := createTestContext()
 
-	scheme := runtime.NewScheme()
-	if err := workv1.AddToScheme(scheme); err != nil {
-		t.Fatalf("Error adding workv1 to scheme: %s", err.Error())
-	}
+	scheme := createWorkScheme()
 
 	type args struct {
 		ctx              context.Context
@@ -1656,7 +1664,7 @@ func Test_createManifestWork(t *testing.T) {
 			name: "should create manifest work with default namespace",
 			args: args{
 				ctx:              ctx,
-				c:                fake.NewClientBuilder().WithScheme(scheme).Build(),
+				c:                createFakeClient(scheme),
 				namespace:        "test-cluster",
 				mworkbindingName: manifest_work_name_binding_name,
 				msaserviceName:   msa_service_name,
@@ -1670,7 +1678,7 @@ func Test_createManifestWork(t *testing.T) {
 			name: "should create manifest work with custom namespace",
 			args: args{
 				ctx:              ctx,
-				c:                fake.NewClientBuilder().WithScheme(scheme).Build(),
+				c:                createFakeClient(scheme),
 				namespace:        "test-cluster",
 				mworkbindingName: manifest_work_name_binding_name,
 				msaserviceName:   msa_service_name,
@@ -1721,8 +1729,8 @@ func Test_createManifestWork(t *testing.T) {
 
 func Test_getMSASecrets(t *testing.T) {
 	// Set up logger
-	log.SetLogger(zap.New(zap.UseDevMode(true)))
-	ctx := context.Background()
+	setupTestLogger()
+	ctx := createTestContext()
 
 	// Create test secrets
 	msaSecret1 := &corev1.Secret{
@@ -1752,15 +1760,9 @@ func Test_getMSASecrets(t *testing.T) {
 		},
 	}
 
-	scheme := runtime.NewScheme()
-	if err := corev1.AddToScheme(scheme); err != nil {
-		t.Fatalf("Error adding corev1 to scheme: %s", err.Error())
-	}
+	scheme := createBasicScheme()
 
-	k8sClient := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithObjects(msaSecret1, msaSecret2, nonMsaSecret).
-		Build()
+	k8sClient := createFakeClient(scheme, msaSecret1, msaSecret2, nonMsaSecret)
 
 	type args struct {
 		ctx       context.Context
@@ -1836,8 +1838,8 @@ func Test_getMSASecrets(t *testing.T) {
 
 func Test_updateAISecrets(t *testing.T) {
 	// Set up logger
-	log.SetLogger(zap.New(zap.UseDevMode(true)))
-	ctx := context.Background()
+	setupTestLogger()
+	ctx := createTestContext()
 
 	// Create test secrets with agent-install label
 	aiSecret1 := &corev1.Secret{
@@ -1867,15 +1869,9 @@ func Test_updateAISecrets(t *testing.T) {
 		},
 	}
 
-	scheme := runtime.NewScheme()
-	if err := corev1.AddToScheme(scheme); err != nil {
-		t.Fatalf("Error adding corev1 to scheme: %s", err.Error())
-	}
+	scheme := createBasicScheme()
 
-	k8sClient := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithObjects(aiSecret1, aiSecret2, nonAiSecret).
-		Build()
+	k8sClient := createFakeClient(scheme, aiSecret1, aiSecret2, nonAiSecret)
 
 	type args struct {
 		ctx context.Context
@@ -1934,8 +1930,8 @@ func Test_updateAISecrets(t *testing.T) {
 
 func Test_updateMetalSecrets(t *testing.T) {
 	// Set up logger
-	log.SetLogger(zap.New(zap.UseDevMode(true)))
-	ctx := context.Background()
+	setupTestLogger()
+	ctx := createTestContext()
 
 	// Create test secrets with metal3 label
 	metalSecret1 := &corev1.Secret{
@@ -1966,15 +1962,9 @@ func Test_updateMetalSecrets(t *testing.T) {
 		},
 	}
 
-	scheme := runtime.NewScheme()
-	if err := corev1.AddToScheme(scheme); err != nil {
-		t.Fatalf("Error adding corev1 to scheme: %s", err.Error())
-	}
+	scheme := createBasicScheme()
 
-	k8sClient := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithObjects(metalSecret1, metalSecretSkipped, nonMetalSecret).
-		Build()
+	k8sClient := createFakeClient(scheme, metalSecret1, metalSecretSkipped, nonMetalSecret)
 
 	type args struct {
 		ctx context.Context
@@ -2048,13 +2038,10 @@ func Test_updateMetalSecrets(t *testing.T) {
 
 func Test_updateSecret(t *testing.T) {
 	// Set up logger
-	log.SetLogger(zap.New(zap.UseDevMode(true)))
-	ctx := context.Background()
+	setupTestLogger()
+	ctx := createTestContext()
 
-	scheme := runtime.NewScheme()
-	if err := corev1.AddToScheme(scheme); err != nil {
-		t.Fatalf("Error adding corev1 to scheme: %s", err.Error())
-	}
+	scheme := createBasicScheme()
 
 	// Create test secrets
 	secretWithoutLabels := corev1.Secret{
@@ -2084,10 +2071,7 @@ func Test_updateSecret(t *testing.T) {
 		},
 	}
 
-	k8sClient := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithObjects(&secretWithExistingBackupLabel, &secretWithHiveLabel).
-		Build()
+	k8sClient := createFakeClient(scheme, &secretWithExistingBackupLabel, &secretWithHiveLabel)
 
 	type args struct {
 		ctx        context.Context
