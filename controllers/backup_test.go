@@ -1,3 +1,17 @@
+/*
+Package controllers contains comprehensive unit tests for backup-related utility functions in the ACM Backup/Restore system.
+
+This test suite validates core backup functionality including:
+- Backup resource creation and configuration
+- Label selector operations and resource filtering
+- Backup validation and error handling
+- Integration with Velero backup resources
+- Namespace and resource inclusion/exclusion logic
+- Backup scheduling and lifecycle management
+
+The tests use standard table-driven test patterns to ensure comprehensive coverage
+of different backup scenarios and edge cases.
+*/
 package controllers
 
 import (

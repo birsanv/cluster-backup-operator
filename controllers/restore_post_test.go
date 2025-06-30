@@ -13,6 +13,21 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
+/*
+Package controllers contains comprehensive unit tests for post-restore operations in the ACM Backup/Restore system.
+
+This test suite validates post-restore functionality including:
+- Post-restore hook execution and validation
+- Resource activation and configuration after restore
+- Managed cluster reconnection and validation
+- Restore completion verification and status updates
+- Integration with restored resources and their dependencies
+- Error handling during post-restore phases
+- Resource cleanup and finalization logic
+
+The tests ensure that all restored resources are properly activated and configured
+after restore operations complete, guaranteeing a fully functional restored environment.
+*/
 
 //nolint:funlen
 package controllers

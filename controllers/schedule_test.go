@@ -13,6 +13,21 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
+/*
+Package controllers contains comprehensive unit tests for schedule-related utility functions in the ACM Backup/Restore system.
+
+This test suite validates core schedule functionality including:
+- Backup schedule resource management and updates
+- Velero schedule creation, deletion, and lifecycle management
+- Schedule validation and resource filtering
+- Restore operation detection and conflict resolution
+- Managed Service Account (MSA) token validation and configuration
+- Schedule ownership and backup relationship tracking
+- Integration with backup storage locations and CRD validation
+
+The tests use fake clients for improved performance and reliability.
+Helper functions from create_helper.go provide consistent test data and reduce setup complexity.
+*/
 
 //nolint:funlen
 package controllers

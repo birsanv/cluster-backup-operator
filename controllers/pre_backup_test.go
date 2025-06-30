@@ -13,6 +13,21 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
+/*
+Package controllers contains comprehensive unit tests for pre-backup operations in the ACM Backup/Restore system.
+
+This test suite validates pre-backup functionality including:
+- Pre-backup hook execution and validation
+- Resource preparation before backup operations
+- Managed cluster state verification
+- Backup readiness checks and validation
+- Integration with backup schedules and storage locations
+- Error handling during pre-backup phases
+- Resource filtering and preparation logic
+
+The tests ensure that all necessary preparations are completed successfully
+before backup operations begin, preventing incomplete or corrupted backups.
+*/
 
 //nolint:funlen
 package controllers

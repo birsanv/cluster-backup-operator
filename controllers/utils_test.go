@@ -1,5 +1,23 @@
 // Copyright Contributors to the Open Cluster Management project
 
+/*
+Package controllers contains comprehensive unit tests for utility functions used across the ACM Backup/Restore system.
+
+This test suite validates core utility functions including:
+- Hub cluster identification and metadata extraction
+- Velero CRD presence detection and validation
+- Backup timestamp parsing and manipulation
+- Storage location validation and configuration
+- Resource filtering and label selector operations
+- Managed service account token validation
+- Backup schedule phase management and collision detection
+- String manipulation and array operations
+
+The tests use fake Kubernetes clients to simulate various cluster states and configurations,
+ensuring reliable testing without external dependencies. Helper functions from create_helper.go
+are used to reduce setup complexity and maintain consistency across test scenarios.
+*/
+
 //nolint:funlen
 package controllers
 
