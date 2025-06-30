@@ -345,6 +345,11 @@ func (b *RestoreHelper) setDeleteTimestamp(deletionTimestamp metav1.Time) *Resto
 	return b
 }
 
+func (b *RestoreHelper) setFinalizer(values []string) *RestoreHelper {
+	b.object.SetFinalizers(values)
+	return b
+}
+
 // acm restore
 type ACMRestoreHelper struct {
 	object *v1beta1.Restore
