@@ -14,7 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 /*
-Package controllers contains comprehensive unit tests for schedule-related utility functions in the ACM Backup/Restore system.
+Package controllers contains comprehensive unit tests for schedule-related utility functions
+in the ACM Backup/Restore system.
 
 This test suite validates core schedule functionality including:
 - Backup schedule resource management and updates
@@ -263,7 +264,7 @@ func Test_setSchedulePhase(t *testing.T) {
 func Test_getSchedulesWithUpdatedResources(t *testing.T) {
 	// Setup fake client with scheme
 	testScheme := runtime.NewScheme()
-	corev1.AddToScheme(testScheme)
+	_ = corev1.AddToScheme(testScheme)
 
 	k8sClient1 := fake.NewClientBuilder().
 		WithScheme(testScheme).
@@ -445,8 +446,8 @@ func Test_deleteVeleroSchedules(t *testing.T) {
 
 	// Setup fake client with scheme
 	testScheme := runtime.NewScheme()
-	veleroapi.AddToScheme(testScheme)
-	corev1.AddToScheme(testScheme)
+	_ = veleroapi.AddToScheme(testScheme)
+	_ = corev1.AddToScheme(testScheme)
 
 	rhacmBackupSchedule := *createBackupSchedule("backup-sch-to-error-restore", veleroNamespaceName).
 		schedule("0 8 * * *").
@@ -915,7 +916,7 @@ func Test_createFailedValidationResponse(t *testing.T) {
 func Test_verifyMSAOptione(t *testing.T) {
 	// Setup fake client with scheme
 	testScheme := runtime.NewScheme()
-	veleroapi.AddToScheme(testScheme)
+	_ = veleroapi.AddToScheme(testScheme)
 
 	k8sClient1 := fake.NewClientBuilder().
 		WithScheme(testScheme).
@@ -997,7 +998,7 @@ func Test_verifyMSAOptione(t *testing.T) {
 	})
 
 	unstructuredScheme := runtime.NewScheme()
-	chnv1.AddToScheme(unstructuredScheme)
+	_ = chnv1.AddToScheme(unstructuredScheme)
 
 	dynClient := dynamicfake.NewSimpleDynamicClient(unstructuredScheme, res_local_ns)
 

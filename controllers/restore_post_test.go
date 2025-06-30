@@ -1784,11 +1784,16 @@ func Test_cleanupDeltaForResourcesBackup(t *testing.T) {
 
 	// Define custom list kinds for the dynamic client
 	listKinds := map[schema.GroupVersionResource]string{
-		{Group: "apps.open-cluster-management.io", Version: "v1beta1", Resource: "channels"}:                         "ChannelList",
-		{Group: "apps.open-cluster-management.io", Version: "v1", Resource: "channels"}:                              "ChannelList",
-		{Group: "apps.open-cluster-management.io", Version: "v1beta1", Resource: "subscriptions"}:                    "SubscriptionList",
-		{Group: "apps.open-cluster-management.io", Version: "v1", Resource: "subscriptions"}:                         "SubscriptionList",
-		{Group: "authentication.open-cluster-management.io", Version: "v1beta1", Resource: "managedserviceaccounts"}: "ManagedServiceAccountList",
+		{Group: "apps.open-cluster-management.io",
+			Version: "v1beta1", Resource: "channels"}: "ChannelList",
+		{Group: "apps.open-cluster-management.io",
+			Version: "v1", Resource: "channels"}: "ChannelList",
+		{Group: "apps.open-cluster-management.io",
+			Version: "v1beta1", Resource: "subscriptions"}: "SubscriptionList",
+		{Group: "apps.open-cluster-management.io",
+			Version: "v1", Resource: "subscriptions"}: "SubscriptionList",
+		{Group: "authentication.open-cluster-management.io",
+			Version: "v1beta1", Resource: "managedserviceaccounts"}: "ManagedServiceAccountList",
 	}
 	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme1, listKinds)
 
@@ -2061,7 +2066,8 @@ func Test_cleanupDeltaForResourcesBackup(t *testing.T) {
 
 			if tt.args.acmRestore.Status.VeleroGenericResourcesRestoreName != "" {
 				// Create generic restore if it's different from resources restore
-				if tt.args.acmRestore.Status.VeleroGenericResourcesRestoreName != tt.args.acmRestore.Status.VeleroResourcesRestoreName {
+				if tt.args.acmRestore.Status.VeleroGenericResourcesRestoreName !=
+					tt.args.acmRestore.Status.VeleroResourcesRestoreName {
 					veleroGenericRestore := &veleroapi.Restore{
 						ObjectMeta: metav1.ObjectMeta{
 							Name:      tt.args.acmRestore.Status.VeleroGenericResourcesRestoreName,
@@ -2196,8 +2202,10 @@ func Test_cleanupDeltaForClustersBackup(t *testing.T) {
 
 	// Define custom list kinds for the dynamic client
 	listKinds := map[schema.GroupVersionResource]string{
-		{Group: "cluster.open-cluster-management.io", Version: "v1beta1", Resource: "managedclusters"}:               "ManagedClusterList",
-		{Group: "authentication.open-cluster-management.io", Version: "v1beta1", Resource: "managedserviceaccounts"}: "ManagedServiceAccountList",
+		{Group: "cluster.open-cluster-management.io", Version: "v1beta1",
+			Resource: "managedclusters"}: "ManagedClusterList",
+		{Group: "authentication.open-cluster-management.io", Version: "v1beta1",
+			Resource: "managedserviceaccounts"}: "ManagedServiceAccountList",
 	}
 	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme1, listKinds)
 
@@ -2381,7 +2389,12 @@ func setupMockDiscoveryServer(t *testing.T) *httptest.Server {
 	}))
 }
 
-func createTestChannelResources(t *testing.T, dyn dynamic.Interface, gvr schema.GroupVersionResource, resources []unstructured.Unstructured) {
+func createTestChannelResources(
+	t *testing.T,
+	dyn dynamic.Interface,
+	gvr schema.GroupVersionResource,
+	resources []unstructured.Unstructured,
+) {
 	for i := range resources {
 		namespace := resources[i].GetNamespace()
 		if namespace == "" {
@@ -2395,7 +2408,12 @@ func createTestChannelResources(t *testing.T, dyn dynamic.Interface, gvr schema.
 	}
 }
 
-func createTestClusterResources(t *testing.T, dyn dynamic.Interface, gvr schema.GroupVersionResource, resources []unstructured.Unstructured) {
+func createTestClusterResources(
+	t *testing.T,
+	dyn dynamic.Interface,
+	gvr schema.GroupVersionResource,
+	resources []unstructured.Unstructured,
+) {
 	for i := range resources {
 		namespace := resources[i].GetNamespace()
 		if namespace == "" {
@@ -2409,7 +2427,12 @@ func createTestClusterResources(t *testing.T, dyn dynamic.Interface, gvr schema.
 	}
 }
 
-func verifyResourcesDeleted(t *testing.T, dyn dynamic.Interface, gvr schema.GroupVersionResource, resources []unstructured.Unstructured) {
+func verifyResourcesDeleted(
+	t *testing.T,
+	dyn dynamic.Interface,
+	gvr schema.GroupVersionResource,
+	resources []unstructured.Unstructured,
+) {
 	for i := range resources {
 		namespace := resources[i].GetNamespace()
 		if namespace == "" {
@@ -2423,7 +2446,12 @@ func verifyResourcesDeleted(t *testing.T, dyn dynamic.Interface, gvr schema.Grou
 	}
 }
 
-func verifyResourcesKept(t *testing.T, dyn dynamic.Interface, gvr schema.GroupVersionResource, resources []unstructured.Unstructured) {
+func verifyResourcesKept(
+	t *testing.T,
+	dyn dynamic.Interface,
+	gvr schema.GroupVersionResource,
+	resources []unstructured.Unstructured,
+) {
 	for i := range resources {
 		namespace := resources[i].GetNamespace()
 		if namespace == "" {

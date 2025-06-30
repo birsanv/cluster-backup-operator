@@ -1,5 +1,6 @@
 /*
-Package controllers contains comprehensive unit tests for backup-related utility functions in the ACM Backup/Restore system.
+Package controllers contains comprehensive unit tests for backup-related utility functions
+in the ACM Backup/Restore system.
 
 This test suite validates core backup functionality including:
 - Backup resource creation and configuration
@@ -464,6 +465,7 @@ func (c *clientWrapper) Create(ctx context.Context, obj client.Object, opts ...c
 // deletion in Velero. If the request fails, it falls back to direct deletion.
 //
 
+//nolint:funlen
 func Test_deleteBackup(t *testing.T) {
 	tests := []struct {
 		name          string

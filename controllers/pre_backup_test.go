@@ -120,6 +120,8 @@ func createTestNamespace(name string) *corev1.Namespace {
 }
 
 // createTestSecret creates a secret with optional labels and annotations
+//
+//nolint:unparam
 func createTestSecret(name, namespace string, labels, annotations map[string]string) *corev1.Secret {
 	return &corev1.Secret{
 		ObjectMeta: v1.ObjectMeta{
@@ -129,14 +131,6 @@ func createTestSecret(name, namespace string, labels, annotations map[string]str
 			Annotations: annotations,
 		},
 	}
-}
-
-// createMSASecret creates a secret with MSA labels
-func createMSASecret(name, namespace string, annotations map[string]string) *corev1.Secret {
-	labels := map[string]string{
-		msa_label: "true",
-	}
-	return createTestSecret(name, namespace, labels, annotations)
 }
 
 // createTestManifestWork creates a ManifestWork for testing
@@ -171,15 +165,6 @@ func createTestManagedCluster(name string, isLocal bool) *clusterv1.ManagedClust
 		}
 	}
 	return cluster
-}
-
-// parseTestTime parses a test timestamp
-func parseTestTime(timeStr string) time.Time {
-	t, err := time.Parse(time.RFC3339, timeStr)
-	if err != nil {
-		panic("Error parsing test time: " + err.Error())
-	}
-	return t
 }
 
 // Test_createMSA tests the creation and management of Managed Service Accounts (MSA) for cluster import.
@@ -1072,7 +1057,8 @@ func Test_cleanupMSAForImportedClusters(t *testing.T) {
 		},
 	}
 
-	k8sClient := createFakeClient(scheme, ns1, nsHive, nsLocal, managedCluster1, managedClusterHive, managedClusterLocal, hiveSecret)
+	k8sClient := createFakeClient(scheme, ns1, nsHive, nsLocal,
+		managedCluster1, managedClusterHive, managedClusterLocal, hiveSecret)
 
 	// Create fake dynamic client with MSA object
 	obj1 := &unstructured.Unstructured{}
@@ -1227,7 +1213,8 @@ func Test_updateSecretsLabels(t *testing.T) {
 
 	scheme := createBasicScheme()
 
-	k8sClient := createFakeClient(scheme, namespace, importSecret, importSecret1, importSecret2, bootstrapSecret, otherSecret)
+	k8sClient := createFakeClient(scheme, namespace, importSecret, importSecret1,
+		importSecret2, bootstrapSecret, otherSecret)
 
 	hiveSecrets := corev1.SecretList{
 		Items: []corev1.Secret{

@@ -20,7 +20,6 @@ import (
 	v1beta1 "github.com/stolostron/cluster-backup-operator/api/v1beta1"
 	veleroapi "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	clusterv1 "open-cluster-management.io/api/cluster/v1"
-	workv1 "open-cluster-management.io/api/work/v1"
 	chnv1 "open-cluster-management.io/multicloud-operators-channel/pkg/apis/apps/v1"
 )
 
@@ -80,21 +79,6 @@ func createSecret(name string, ns string,
 	}
 
 	return secret
-}
-
-func createMWork(name string, ns string) *workv1.ManifestWork {
-	mwork := &workv1.ManifestWork{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: "v1",
-			Kind:       "work.open-cluster-management.io",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: ns,
-		},
-	}
-
-	return mwork
 }
 
 func createConfigMap(name string, ns string,
@@ -1122,19 +1106,6 @@ func createMSAUnstructured(name, namespace string) *unstructured.Unstructured {
 	return msa
 }
 
-// NamespaceUnstructuredHelper creates unstructured Namespace objects for testing
-func createNamespaceUnstructured(name string) *unstructured.Unstructured {
-	ns := &unstructured.Unstructured{}
-	ns.SetUnstructuredContent(map[string]interface{}{
-		"apiVersion": "v1",
-		"kind":       "Namespace",
-		"metadata": map[string]interface{}{
-			"name": name,
-		},
-	})
-	return ns
-}
-
 // TestSchemeSetup creates a common scheme with all necessary APIs for testing
 func setupTestScheme() (*runtime.Scheme, error) {
 	scheme := runtime.NewScheme()
@@ -1174,6 +1145,7 @@ type TestBackupSetup struct {
 	VeleroClustersBackupNameOlder string
 }
 
+//nolint:funlen
 func createTestBackupSetup() *TestBackupSetup {
 	namespaceName := "open-cluster-management-backup"
 	clusterNamespace := "managed1"
@@ -1278,10 +1250,10 @@ func CreateTestClientOrFail(t *testing.T, objects ...client.Object) client.Clien
 // ScheduleTestScheme creates a scheme with all APIs needed for schedule tests
 func createScheduleTestScheme() *runtime.Scheme {
 	testScheme := runtime.NewScheme()
-	corev1.AddToScheme(testScheme)
-	veleroapi.AddToScheme(testScheme)
-	v1beta1.AddToScheme(testScheme)
-	ocinfrav1.AddToScheme(testScheme)
+	_ = corev1.AddToScheme(testScheme)
+	_ = veleroapi.AddToScheme(testScheme)
+	_ = v1beta1.AddToScheme(testScheme)
+	_ = ocinfrav1.AddToScheme(testScheme)
 	return testScheme
 }
 
@@ -1378,7 +1350,11 @@ func (vto *VeleroTestObjects) AsObjects() []client.Object {
 }
 
 // CreateDeleteVeleroSchedulesTestClient creates a client for deleteVeleroSchedules tests with conditional setup
-func CreateDeleteVeleroSchedulesTestClient(testName string, veleroNamespace *corev1.Namespace, veleroSchedules *veleroapi.ScheduleList) client.Client {
+func CreateDeleteVeleroSchedulesTestClient(
+	testName string,
+	veleroNamespace *corev1.Namespace,
+	veleroSchedules *veleroapi.ScheduleList,
+) client.Client {
 	testObjects := []client.Object{veleroNamespace}
 
 	// Add schedules for specific test cases
@@ -1424,18 +1400,18 @@ func createUtilsTestScheme(includeVelero, includeOCInfra, includeV1Beta1 bool) *
 	testScheme := runtime.NewScheme()
 
 	// Always add core v1
-	corev1.AddToScheme(testScheme)
+	_ = corev1.AddToScheme(testScheme)
 
 	if includeVelero {
-		veleroapi.AddToScheme(testScheme)
+		_ = veleroapi.AddToScheme(testScheme)
 	}
 
 	if includeOCInfra {
-		ocinfrav1.AddToScheme(testScheme)
+		_ = ocinfrav1.AddToScheme(testScheme)
 	}
 
 	if includeV1Beta1 {
-		v1beta1.AddToScheme(testScheme)
+		_ = v1beta1.AddToScheme(testScheme)
 	}
 
 	return testScheme
