@@ -21,7 +21,6 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -973,43 +972,80 @@ func Test_cleanupMSAForImportedClusters(t *testing.T) {
 }
 
 func Test_updateSecretsLabels(t *testing.T) {
-	testEnv := &envtest.Environment{
-		CRDDirectoryPaths: []string{
-			filepath.Join("..", "config", "crd", "bases"),
-			filepath.Join("..", "hack", "crds"),
-		},
-		ErrorIfCRDPathMissing: true,
-	}
-
-	scheme1 := runtime.NewScheme()
-
-	cfg, e1 := testEnv.Start()
-	k8sClient1, e2 := client.New(cfg, client.Options{Scheme: scheme1})
-	e3 := clusterv1.AddToScheme(scheme1)
-	e4 := corev1.AddToScheme(scheme1)
-	if err := errors.Join(e1, e2, e3, e4); err != nil {
-		t.Fatalf("Error setting up testenv: %s", err.Error())
-	}
+	// Set up logger
+	log.SetLogger(zap.New(zap.UseDevMode(true)))
+	ctx := context.Background()
 
 	labelName := backupCredsClusterLabel
 	labelValue := "clusterpool"
 	clsName := "managed1"
 
-	if err := k8sClient1.Create(context.Background(), createNamespace(clsName)); err != nil {
-		t.Fatalf("cannot create ns %s ", err.Error())
+	// Create test namespace
+	namespace := &corev1.Namespace{
+		ObjectMeta: v1.ObjectMeta{
+			Name: clsName,
+		},
 	}
+
+	// Create test secrets
+	importSecret := &corev1.Secret{
+		ObjectMeta: v1.ObjectMeta{
+			Name:      clsName + "-import", // Should NOT be backed up (import secrets are excluded)
+			Namespace: clsName,
+			Labels: map[string]string{
+				labelName: labelValue, // Already has label, should be removed
+			},
+		},
+	}
+
+	importSecret1 := &corev1.Secret{
+		ObjectMeta: v1.ObjectMeta{
+			Name:      clsName + "-import-1", // Should be backed up (not exact import name)
+			Namespace: clsName,
+			Labels: map[string]string{
+				labelName: labelValue, // Already has label, should keep it
+			},
+		},
+	}
+
+	importSecret2 := &corev1.Secret{
+		ObjectMeta: v1.ObjectMeta{
+			Name:      clsName + "-import-2", // Should be backed up (no existing label)
+			Namespace: clsName,
+		},
+	}
+
+	bootstrapSecret := &corev1.Secret{
+		ObjectMeta: v1.ObjectMeta{
+			Name:      clsName + "-bootstrap-test", // Should NOT be backed up (bootstrap secrets are excluded)
+			Namespace: clsName,
+		},
+	}
+
+	otherSecret := &corev1.Secret{
+		ObjectMeta: v1.ObjectMeta{
+			Name:      clsName + "-some-other-secret-test", // Should be backed up
+			Namespace: clsName,
+		},
+	}
+
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("Error adding corev1 to scheme: %s", err.Error())
+	}
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(namespace, importSecret, importSecret1, importSecret2, bootstrapSecret, otherSecret).
+		Build()
 
 	hiveSecrets := corev1.SecretList{
 		Items: []corev1.Secret{
-			*createSecret(clsName+"-import", clsName, map[string]string{
-				labelName: labelValue,
-			}, nil, nil), // do not back up, name is cls-import
-			*createSecret(clsName+"-import-1", clsName, map[string]string{
-				labelName: labelValue,
-			}, nil, nil), // back it up
-			*createSecret(clsName+"-import-2", clsName, nil, nil, nil),               // back it up
-			*createSecret(clsName+"-bootstrap-test", clsName, nil, nil, nil),         // do not backup
-			*createSecret(clsName+"-some-other-secret-test", clsName, nil, nil, nil), // backup
+			*importSecret,
+			*importSecret1,
+			*importSecret2,
+			*bootstrapSecret,
+			*otherSecret,
 		},
 	}
 
@@ -1022,61 +1058,79 @@ func Test_updateSecretsLabels(t *testing.T) {
 		lValue  string
 	}
 	tests := []struct {
-		name          string
-		args          args
-		backupSecrets []string // what should be backed up
+		name                    string
+		args                    args
+		expectedBackupSecrets   []string // Secrets that should have backup label
+		expectedNoBackupSecrets []string // Secrets that should NOT have backup label
 	}{
 		{
-			name: "hive secrets 1",
+			name: "should process hive secrets correctly",
 			args: args{
-				ctx:     context.Background(),
-				c:       k8sClient1,
+				ctx:     ctx,
+				c:       k8sClient,
 				secrets: hiveSecrets,
 				lName:   labelName,
 				lValue:  labelValue,
 				prefix:  clsName,
 			},
-			backupSecrets: []string{"managed1-import-1", "managed1-import-2", "managed1-some-other-secret-test"},
+			expectedBackupSecrets: []string{
+				"managed1-import-1",               // Already had label, should keep it
+				"managed1-import-2",               // Should get label added
+				"managed1-some-other-secret-test", // Should get label added
+			},
+			expectedNoBackupSecrets: []string{
+				"managed1-import",         // Import secret should have label removed
+				"managed1-bootstrap-test", // Bootstrap secret should not get label
+			},
 		},
 	}
-	for _, tt := range tests {
-		for index := range hiveSecrets.Items {
-			if err := k8sClient1.Create(context.Background(), &hiveSecrets.Items[index]); err != nil {
-				t.Errorf("cannot create %s ", err.Error())
-			}
-		}
 
+	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			updateSecretsLabels(tt.args.ctx, k8sClient1,
+			// Call the function under test
+			updateSecretsLabels(tt.args.ctx, tt.args.c,
 				tt.args.secrets,
 				tt.args.prefix,
 				tt.args.lName,
 				tt.args.lValue,
 			)
+
+			// Verify secrets that should have backup labels
+			for _, secretName := range tt.expectedBackupSecrets {
+				secret := &corev1.Secret{}
+				err := k8sClient.Get(ctx, types.NamespacedName{
+					Name:      secretName,
+					Namespace: clsName,
+				}, secret)
+				if err != nil {
+					t.Errorf("Failed to get secret %s: %v", secretName, err)
+					continue
+				}
+
+				if secret.Labels == nil || secret.Labels[labelName] != labelValue {
+					t.Errorf("Expected secret %s to have backup label %s=%s, got %v",
+						secretName, labelName, labelValue, secret.Labels)
+				}
+			}
+
+			// Verify secrets that should NOT have backup labels
+			for _, secretName := range tt.expectedNoBackupSecrets {
+				secret := &corev1.Secret{}
+				err := k8sClient.Get(ctx, types.NamespacedName{
+					Name:      secretName,
+					Namespace: clsName,
+				}, secret)
+				if err != nil {
+					t.Errorf("Failed to get secret %s: %v", secretName, err)
+					continue
+				}
+
+				if secret.Labels != nil && secret.Labels[labelName] == labelValue {
+					t.Errorf("Expected secret %s to NOT have backup label %s=%s, but it does",
+						secretName, labelName, labelValue)
+				}
+			}
 		})
-
-		result := []string{}
-		for index := range hiveSecrets.Items {
-			secret := hiveSecrets.Items[index]
-			if err := k8sClient1.Get(context.Background(), types.NamespacedName{
-				Name:      secret.Name,
-				Namespace: secret.Namespace,
-			}, &secret); err != nil {
-				t.Errorf("cannot get secret %s ", err.Error())
-			}
-			if secret.GetLabels()[labelName] == labelValue {
-				// it was backed up
-				result = append(result, secret.Name)
-			}
-		}
-
-		if !reflect.DeepEqual(result, tt.backupSecrets) {
-			t.Errorf("updateSecretsLabels() = %v want %v", result, tt.backupSecrets)
-		}
-	}
-
-	if err := testEnv.Stop(); err != nil {
-		t.Fatalf("Error stopping testenv: %s", err.Error())
 	}
 }
 
