@@ -152,9 +152,43 @@ var _ = Describe("Backup", func() {
 	})
 })
 
-// Test_cleanupExpiredValidationBackups tests the cleanupExpiredValidationBackups function
-// which is responsible for cleaning up expired validation backups that Velero doesn't
-// automatically delete when they are in FailedValidation status or storage location issues.
+// Test_cleanupExpiredValidationBackups tests the cleanup of expired validation backups.
+//
+// This test verifies that:
+// - Expired validation backups are properly identified and deleted
+// - Non-expired validation backups are preserved
+// - Non-validation backups are not affected by the cleanup process
+// - The function handles edge cases like empty backup lists gracefully
+//
+// Test Coverage:
+// - Validation backups with expired timestamps (should be deleted)
+// - Validation backups that are still valid (should be preserved)
+// - Non-validation backups (should be ignored)
+// - Empty backup lists (should handle gracefully)
+// - Different backup phases (FailedValidation, Completed, etc.)
+//
+// Test Scenarios:
+//   - "cleanupExpiredValidationBackups processes expired validation backups correctly"
+//     Creates a mix of expired and valid validation backups plus non-validation backups
+//     Verifies only expired validation backups are deleted
+//   - "cleanupExpiredValidationBackups handles no validation backups"
+//     Tests behavior when no validation backups exist in the system
+//   - "cleanupExpiredValidationBackups handles empty backup list"
+//     Tests behavior with completely empty backup list
+//
+// Implementation Details:
+// - Uses fake Kubernetes client for fast, isolated testing
+// - Creates realistic backup objects with proper labels and timestamps
+// - Uses custom client wrapper to track deletion operations
+// - Verifies deletion through mock client inspection
+// - Tests various backup phases and expiration scenarios
+//
+// Background:
+// Velero doesn't automatically clean up validation backups that fail validation
+// or have storage location issues. This function provides that cleanup capability
+// to prevent accumulation of failed validation backups.
+//
+
 // createExpiredValidationBackups creates test backups for expired validation scenario
 //
 //nolint:funlen
@@ -377,6 +411,44 @@ func (c *clientWrapper) Create(ctx context.Context, obj client.Object, opts ...c
 	}
 	return c.Client.Create(ctx, obj, opts...)
 }
+
+// Test_deleteBackup tests the deletion of Velero backup objects through DeleteBackupRequest creation.
+//
+// This test verifies that:
+// - DeleteBackupRequest objects are properly created for backup deletion
+// - The function handles various backup states and conditions correctly
+// - Error conditions are managed gracefully (missing namespace, existing requests, etc.)
+// - Backup deletion works through Velero's standard deletion mechanism
+//
+// Test Coverage:
+// - Standard backup deletion with valid backup object
+// - Backup deletion when namespace is missing (should handle gracefully)
+// - Backup deletion when DeleteBackupRequest already exists
+// - Backup deletion when DeleteBackupRequest has errors (should delete backup directly)
+// - Various error conditions and edge cases
+//
+// Test Scenarios:
+//   - "should successfully create DeleteBackupRequest for existing backup"
+//     Tests normal case where backup exists and DeleteBackupRequest is created
+//   - "should handle missing namespace gracefully"
+//     Tests behavior when backup namespace doesn't exist
+//   - "should handle backup deletion when DeleteBackupRequest already exists"
+//     Tests idempotent behavior when deletion request already exists
+//   - "should handle DeleteBackupRequest with errors and delete backup"
+//     Tests fallback deletion when DeleteBackupRequest encounters errors
+//
+// Implementation Details:
+// - Uses fake Kubernetes client for isolated testing
+// - Creates realistic Velero Backup and DeleteBackupRequest objects
+// - Tests both successful and error scenarios
+// - Verifies proper error handling and logging
+// - Uses custom client wrapper to track operations
+//
+// Velero Integration:
+// The function integrates with Velero's backup deletion mechanism by creating
+// DeleteBackupRequest objects, which is the standard way to request backup
+// deletion in Velero. If the request fails, it falls back to direct deletion.
+//
 
 func Test_deleteBackup(t *testing.T) {
 	tests := []struct {

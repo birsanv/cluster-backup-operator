@@ -50,6 +50,24 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 )
 
+// Test_postRestoreActivation tests the activation of managed clusters after a restore operation.
+//
+// This test verifies that:
+// - Managed service account secrets are properly processed for cluster activation
+// - Cluster activation timestamps are updated correctly
+// - Multiple clusters can be activated simultaneously
+// - Invalid or missing secrets are handled gracefully
+//
+// Test Scenarios:
+// - Single cluster activation with valid MSA secret
+// - Multiple cluster activation with mixed secret states
+// - Activation with missing or invalid secrets
+// - Timestamp validation and updating
+//
+// Implementation:
+// - Uses fake Kubernetes client for fast execution
+// - Creates realistic MSA secrets with proper labels and structure
+// - Verifies activation results through secret inspection
 func Test_postRestoreActivation(t *testing.T) {
 	ns1 := *createNamespace("managed-activ-1")
 	ns2 := *createNamespace("managed-activ-2")
@@ -224,6 +242,24 @@ func Test_postRestoreActivation(t *testing.T) {
 	}
 }
 
+// Test_executePostRestoreTasks tests the execution of post-restore cleanup tasks.
+//
+// This test verifies that:
+// - Post-restore tasks are executed in the correct order
+// - Cleanup operations are performed based on restore configuration
+// - Error conditions are handled properly during task execution
+// - Task execution status is properly tracked and reported
+//
+// Test Scenarios:
+// - Successful execution of all post-restore tasks
+// - Partial execution with error handling
+// - Different cleanup configurations (CleanupTypeAll, CleanupTypeRestored, CleanupTypeNone)
+// - Task execution with missing or invalid restore objects
+//
+// Implementation:
+// - Uses fake Kubernetes client for isolated testing
+// - Mocks various restore configurations and states
+// - Verifies task execution through status inspection
 func Test_executePostRestoreTasks(t *testing.T) {
 	// Use helper function for client setup
 	k8sClient1 := CreateTestClientOrFail(t,
@@ -288,6 +324,28 @@ func Test_executePostRestoreTasks(t *testing.T) {
 		t.Errorf("this secret should no longer exist ! %v ", obs_secret_name)
 	}
 }
+
+// Test_deleteDynamicResource_LocalCluster tests deletion of resources in the local cluster context.
+//
+// This focused test covers local cluster resource deletion scenarios.
+//
+// Test Coverage:
+// - Deletion of resources specifically in the local cluster (hub cluster)
+// - Handling of different local cluster naming conventions ('local-cluster', custom names)
+// - Proper resource identification and deletion in local cluster context
+// - Verification that only local cluster resources are affected
+//
+// Test Scenarios:
+// - Delete local cluster resource with standard name 'local-cluster'
+// - Delete local cluster resource with custom local cluster name
+// - Verify non-local resources are not affected
+//
+// Implementation Details:
+// - Uses dynamic fake client for fast execution (< 0.01s)
+// - Creates test resources with proper metadata and labels
+// - Verifies deletion through resource existence checks
+// - Tests different local cluster naming patterns
+//
 
 func Test_deleteDynamicResource_LocalCluster(t *testing.T) {
 	// Channel resource in the local-cluster namespace
@@ -406,6 +464,38 @@ func Test_deleteDynamicResource_LocalCluster(t *testing.T) {
 		})
 	}
 }
+
+// Test_deleteDynamicResource_DefaultNamespace tests deletion of resources in the default namespace.
+//
+// This focused test covers default namespace resource deletion scenarios.
+//
+// Test Coverage:
+// - Standard resource deletion in default namespace
+// - Finalizer handling and removal during deletion
+// - Error handling for missing/not-found resources
+// - Namespace exclusion logic
+// - Backup label exclusion handling
+// - Skip exclusion override functionality
+//
+// Test Scenarios:
+// - Delete default resource (happy path)
+// - Delete resource with finalizer (tests finalizer removal logic)
+// - Delete resource that doesn't exist (error handling)
+// - Delete resource in excluded namespace (should be skipped)
+// - Delete resource with backup exclusion label
+// - Delete excluded resource when skip exclusion is disabled
+//
+// Implementation Details:
+// - Uses dynamic fake client with proper resource setup
+// - Creates resources with various metadata configurations
+// - Tests finalizer removal before resource deletion
+// - Verifies proper error handling and logging
+// - Validates exclusion logic for namespaces and labels
+//
+// Finalizer Handling:
+// The test includes scenarios where resources have finalizers that must be
+// removed before deletion. This tests the complete deletion workflow.
+//
 
 func Test_deleteDynamicResource_DefaultNamespace(t *testing.T) {
 	res_default := &unstructured.Unstructured{}
@@ -630,6 +720,34 @@ func Test_deleteDynamicResource_DefaultNamespace(t *testing.T) {
 		})
 	}
 }
+
+// Test_deleteDynamicResource_GlobalResources tests deletion of cluster-scoped (global) resources.
+//
+// This focused test covers global/cluster-scoped resource deletion scenarios.
+//
+// Test Coverage:
+// - Standard global resource deletion
+// - Finalizer handling for cluster-scoped resources
+// - Error handling for missing global resources
+// - Verification that namespace exclusion doesn't apply to global resources
+//
+// Test Scenarios:
+// - Delete global resource (happy path)
+// - Delete global resource with finalizer (tests finalizer removal)
+// - Delete global resource that doesn't exist (error handling)
+//
+// Implementation Details:
+// - Uses dynamic fake client configured for cluster-scoped resources
+// - Creates global resources without namespace specifications
+// - Tests finalizer removal workflow for cluster-scoped resources
+// - Verifies proper error handling for missing resources
+//
+// Global Resource Characteristics:
+// - No namespace field (cluster-scoped)
+// - Different deletion patterns compared to namespaced resources
+// - Finalizer handling works the same way as namespaced resources
+// - Namespace exclusion logic doesn't apply
+//
 
 func Test_deleteDynamicResource_GlobalResources(t *testing.T) {
 	res_global := &unstructured.Unstructured{}
@@ -1528,6 +1646,46 @@ func Test_cleanupDeltaForCredentials(t *testing.T) {
 	}
 }
 
+// Test_cleanupDeltaForResourcesBackup tests cleanup of application resources after backup operations.
+//
+// This focused test covers resource backup cleanup scenarios.
+//
+// Test Coverage:
+// - Cleanup of application resources (Channels, Subscriptions, etc.) after backup
+// - Generic backup processing and resource matching
+// - Resource deletion based on backup labels and timestamps
+// - Handling of different cleanup policies (CleanupTypeRestored, CleanupTypeAll)
+// - Integration with Velero backup and restore objects
+//
+// Test Scenarios:
+// - Cleanup with no generic backup found
+// - Cleanup with generic backup NOT found but older backup available
+// - Cleanup with generic backup NOT found and clusters backup not skipped
+// - Cleanup with generic backup found
+// - Cleanup with generic backup found and clusters backup not skipped
+// - Cleanup with different cleanup policies (CleanupTypeAll vs CleanupTypeRestored)
+//
+// Resource Types Tested:
+// - Channels (apps.open-cluster-management.io)
+// - Subscriptions (apps.open-cluster-management.io)
+// - ManagedServiceAccounts (authentication.open-cluster-management.io)
+//
+// Implementation Details:
+// - Uses dynamic fake client with custom list kinds for proper resource handling
+// - Implements mock discovery server to handle API group discovery
+// - Creates realistic Velero Backup and Restore objects
+// - Tests resource creation, labeling, and deletion workflows
+// - Verifies proper handling of finalizers and excluded namespaces
+//
+// Mock Infrastructure:
+// - Custom discovery server for API group handling
+// - Dynamic fake client with proper list kind mappings
+// - Fake Kubernetes client for Velero object management
+// - Realistic resource creation with proper labels and metadata
+//
+
+//
+
 func Test_cleanupDeltaForResourcesBackup(t *testing.T) {
 	log.SetLogger(zap.New())
 
@@ -1925,6 +2083,58 @@ func Test_cleanupDeltaForResourcesBackup(t *testing.T) {
 		})
 	}
 }
+
+// Test_cleanupDeltaForClustersBackup tests cleanup of cluster resources after backup operations.
+//
+// This focused test covers cluster backup cleanup scenarios.
+//
+// Test Coverage:
+// - Cleanup of cluster-scoped resources (ManagedClusters, etc.) after backup
+// - Cluster resource deletion based on backup labels and policies
+// - Handling of cluster-specific exclusion logic
+// - Integration with Velero cluster backup objects
+// - Processing of various cluster-related resource types
+//
+// Resource Types Tested:
+// - ManagedClusters (cluster.open-cluster-management.io)
+// - ManagedServiceAccounts (authentication.open-cluster-management.io)
+// - ClusterDeployments (hive.openshift.io) - via discovery
+// - MachinePools (hive.openshift.io) - via discovery
+// - KlusterletAddonConfigs (agent.open-cluster-management.io) - via discovery
+// - ManagedClusterAddons (addon.open-cluster-management.io) - via discovery
+// - ClusterPools (hive.openshift.io) - via discovery
+// - ClusterClaims (hive.openshift.io) - via discovery
+// - ClusterCurators (cluster.open-cluster-management.io) - via discovery
+// - BMCEventSubscriptions (metal3.io) - via discovery
+// - HostFirmwareSettings (metal3.io) - via discovery
+// - ClusterSyncs (hiveinternal.openshift.io) - via discovery
+// - MultiClusterObservabilities (observability.open-cluster-management.io) - via discovery
+//
+// Test Scenarios:
+// - Standard cluster backup cleanup with proper resource deletion
+// - Verification of cluster resource identification and processing
+// - Handling of missing or unavailable cluster resource types
+// - Proper exclusion of local cluster resources
+//
+// Implementation Details:
+// - Uses dynamic fake client with custom list kinds for cluster resources
+// - Implements comprehensive mock discovery server for cluster API groups
+// - Creates realistic cluster resources with proper metadata and labels
+// - Tests cluster-specific deletion workflows and exclusion logic
+// - Verifies proper handling of various cluster resource types
+//
+// Mock Infrastructure:
+// - Enhanced discovery server supporting all cluster resource API groups
+// - Dynamic fake client with cluster resource list kind mappings
+// - Fake Kubernetes client for Velero cluster backup object management
+// - Realistic cluster resource creation with proper cluster labels
+//
+
+//
+// API Group Coverage:
+// The test covers discovery and processing of numerous cluster-related API groups,
+// demonstrating the comprehensive nature of cluster backup cleanup operations.
+//
 
 func Test_cleanupDeltaForClustersBackup(t *testing.T) {
 	log.SetLogger(zap.New())

@@ -167,6 +167,71 @@ func parseTestTime(timeStr string) time.Time {
 	return t
 }
 
+// Test_createMSA tests the creation and management of Managed Service Accounts (MSA) for cluster import.
+//
+// This test verifies that:
+// - MSA objects are created correctly for cluster import scenarios
+// - Token validity periods are properly managed and updated
+// - ManifestWork objects are created and managed for MSA deployment
+// - Secret generation and updates work correctly
+// - Different MSA types (main and pair) are handled appropriately
+//
+// Test Coverage:
+// - MSA creation for new clusters (generates new MSA and secrets)
+// - MSA validity updates for existing clusters (updates token validity)
+// - MSA pair token generation and management
+// - Invalid token handling and error recovery
+// - Pre-existing MSA scenarios with different validity periods
+//
+// Test Scenarios:
+// - "msa generated now": Tests creation of new MSA with secrets and ManifestWork
+// - "msa not generated now but validity updated": Tests validity updates for existing MSA
+// - "msa pair secrets not generated now": Tests pair MSA handling when not needed
+// - "msa not generated now AND invalid token": Tests error handling with invalid tokens
+// - "MSA pair generated now": Tests pair MSA creation with expiring tokens
+//
+// Implementation Details:
+// - Uses fake Kubernetes client for isolated testing
+// - Creates realistic MSA, Secret, and ManifestWork objects
+// - Uses dynamic fake client for MSA resource management
+// - Tests various token validity scenarios and edge cases
+// - Verifies proper secret labeling and annotation handling
+//
+// Test_createMSA tests the creation and management of Managed Service Accounts (MSAs).
+//
+// This test verifies that:
+// - MSAs are created correctly for managed clusters
+// - MSA token validity is properly updated when needed
+// - Pair MSAs are handled appropriately
+// - Invalid token scenarios are managed gracefully
+// - Pre-existing MSAs are updated rather than recreated
+//
+// Test Coverage:
+// - MSA creation for new managed clusters
+// - MSA validity updates for existing MSAs
+// - Pair MSA generation and management
+// - Error handling for invalid token formats
+// - Pre-existing MSA detection and updates
+//
+// Test Scenarios:
+// - "msa generated now": Tests creation of new MSA with proper validity
+// - "msa not generated now but validity updated": Tests updating validity of existing MSA
+// - "msa pair secrets not generated now": Tests handling of pair MSA scenarios
+// - "msa not generated now AND invalid token": Tests error handling for invalid tokens
+// - "MSA pair generated now": Tests creation of pair MSAs with proper timing
+//
+// Implementation Details:
+// - Uses fake Kubernetes client for isolated testing
+// - Creates realistic MSA objects with proper metadata and specifications
+// - Uses dynamic fake client for MSA resource management
+// - Tests various validity periods and token scenarios
+// - Verifies proper ManifestWork creation and cleanup
+//
+// MSA Concepts:
+// - Main MSAs: Primary service accounts for cluster authentication
+// - Pair MSAs: Secondary service accounts for specific use cases
+// - Token validity: Time-based expiration for security rotation
+// - ManifestWork: Kubernetes objects that deploy MSAs to managed clusters
 func Test_createMSA(t *testing.T) {
 	// Set up logger
 	setupTestLogger()
@@ -466,6 +531,38 @@ func Test_createMSA(t *testing.T) {
 	}
 }
 
+// Test_updateMSAToken tests the updating of MSA token validity and rotation settings.
+//
+// This test verifies that:
+// - MSA token validity is updated correctly in existing MSA objects
+// - Rotation settings are properly configured
+// - Different validity periods are handled appropriately
+// - MSA object structure is maintained during updates
+// - Error conditions are handled gracefully
+//
+// Test Coverage:
+// - Token validity updates for various time periods
+// - Rotation configuration management
+// - MSA object field preservation during updates
+// - Error handling for invalid MSA objects
+// - Dynamic client interaction for MSA updates
+//
+// Test Scenarios:
+// - Various validity periods (hours, minutes, etc.)
+// - Different MSA configurations and states
+// - Update operations on existing MSA objects
+// - Validation of updated MSA specifications
+//
+// Implementation Details:
+// - Uses dynamic fake client for MSA resource management
+// - Creates realistic MSA objects with proper API versions
+// - Tests direct MSA object updates through dynamic interface
+// - Verifies proper field updates and structure preservation
+//
+// MSA Token Management:
+// MSA tokens have configurable validity periods for security rotation.
+// This function ensures tokens are updated with appropriate expiration
+// times while maintaining the MSA object's integrity and configuration.
 func Test_updateMSAToken(t *testing.T) {
 	obj1 := &unstructured.Unstructured{}
 	obj1.SetUnstructuredContent(map[string]interface{}{
