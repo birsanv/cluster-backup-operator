@@ -27,6 +27,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -1433,6 +1434,616 @@ func Test_updateMSAResources(t *testing.T) {
 					t.Errorf("non-MSA secret should not have backup label, got %v",
 						unchangedNonMsa.Labels["cluster.open-cluster-management.io/backup"])
 				}
+			}
+		})
+	}
+}
+
+func Test_deleteCustomManifestWork(t *testing.T) {
+	// Set up logger
+	log.SetLogger(zap.New(zap.UseDevMode(true)))
+	ctx := context.Background()
+
+	// Create a fake client with a ManifestWork that should be deleted
+	manifestWork := &workv1.ManifestWork{
+		ObjectMeta: v1.ObjectMeta{
+			Name:      manifest_work_name + mwork_custom_282,
+			Namespace: "test-namespace",
+		},
+	}
+
+	scheme := runtime.NewScheme()
+	if err := workv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("Error adding workv1 to scheme: %s", err.Error())
+	}
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(manifestWork).
+		Build()
+
+	type args struct {
+		ctx       context.Context
+		c         client.Client
+		namespace string
+		mworkName string
+	}
+	tests := []struct {
+		name            string
+		args            args
+		shouldBeDeleted bool
+	}{
+		{
+			name: "should delete existing custom manifest work",
+			args: args{
+				ctx:       ctx,
+				c:         k8sClient,
+				namespace: "test-namespace",
+				mworkName: manifest_work_name,
+			},
+			shouldBeDeleted: true,
+		},
+		{
+			name: "should handle non-existent manifest work gracefully",
+			args: args{
+				ctx:       ctx,
+				c:         k8sClient,
+				namespace: "non-existent-namespace",
+				mworkName: manifest_work_name,
+			},
+			shouldBeDeleted: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Call the function under test
+			deleteCustomManifestWork(tt.args.ctx, tt.args.c, tt.args.namespace, tt.args.mworkName)
+
+			// Verify the ManifestWork was deleted if it should have been
+			mwork := &workv1.ManifestWork{}
+			err := k8sClient.Get(ctx, types.NamespacedName{
+				Name:      tt.args.mworkName + mwork_custom_282,
+				Namespace: tt.args.namespace,
+			}, mwork)
+
+			if tt.shouldBeDeleted && err == nil {
+				t.Errorf("Expected ManifestWork to be deleted, but it still exists")
+			}
+			if !tt.shouldBeDeleted && err != nil && !apierrors.IsNotFound(err) {
+				t.Errorf("Unexpected error when checking for non-existent ManifestWork: %v", err)
+			}
+		})
+	}
+}
+
+func Test_createManifestWork(t *testing.T) {
+	// Set up logger
+	log.SetLogger(zap.New(zap.UseDevMode(true)))
+	ctx := context.Background()
+
+	scheme := runtime.NewScheme()
+	if err := workv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("Error adding workv1 to scheme: %s", err.Error())
+	}
+
+	type args struct {
+		ctx              context.Context
+		c                client.Client
+		namespace        string
+		mworkbindingName string
+		msaserviceName   string
+		mworkName        string
+		installNamespace string
+	}
+	tests := []struct {
+		name                      string
+		args                      args
+		expectManifestWorkCreated bool
+		expectedManifestWorkName  string
+	}{
+		{
+			name: "should create manifest work with default namespace",
+			args: args{
+				ctx:              ctx,
+				c:                fake.NewClientBuilder().WithScheme(scheme).Build(),
+				namespace:        "test-cluster",
+				mworkbindingName: manifest_work_name_binding_name,
+				msaserviceName:   msa_service_name,
+				mworkName:        manifest_work_name,
+				installNamespace: defaultAddonNS,
+			},
+			expectManifestWorkCreated: true,
+			expectedManifestWorkName:  manifest_work_name,
+		},
+		{
+			name: "should create manifest work with custom namespace",
+			args: args{
+				ctx:              ctx,
+				c:                fake.NewClientBuilder().WithScheme(scheme).Build(),
+				namespace:        "test-cluster",
+				mworkbindingName: manifest_work_name_binding_name,
+				msaserviceName:   msa_service_name,
+				mworkName:        manifest_work_name,
+				installNamespace: "custom-namespace",
+			},
+			expectManifestWorkCreated: true,
+			expectedManifestWorkName:  manifest_work_name + mwork_custom_283,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Call the function under test
+			createManifestWork(tt.args.ctx, tt.args.c, tt.args.namespace, "",
+				tt.args.mworkbindingName, tt.args.msaserviceName, tt.args.mworkName, tt.args.installNamespace)
+
+			if tt.expectManifestWorkCreated {
+				// Verify ManifestWork was created
+				mwork := &workv1.ManifestWork{}
+				err := tt.args.c.Get(ctx, types.NamespacedName{
+					Name:      tt.expectedManifestWorkName,
+					Namespace: tt.args.namespace,
+				}, mwork)
+
+				if err != nil {
+					t.Errorf("Expected ManifestWork %s to be created, but got error: %v",
+						tt.expectedManifestWorkName, err)
+				} else {
+					// Verify labels
+					if mwork.Labels[addon_work_label] != msa_addon {
+						t.Errorf("Expected addon work label %s, got %s",
+							msa_addon, mwork.Labels[addon_work_label])
+					}
+					if mwork.Labels[backupCredsClusterLabel] != ClusterActivationLabel {
+						t.Errorf("Expected cluster label %s, got %s",
+							ClusterActivationLabel, mwork.Labels[backupCredsClusterLabel])
+					}
+					// Verify manifest content exists
+					if len(mwork.Spec.Workload.Manifests) == 0 {
+						t.Errorf("Expected ManifestWork to have manifests, but got none")
+					}
+				}
+			}
+		})
+	}
+}
+
+func Test_getMSASecrets(t *testing.T) {
+	// Set up logger
+	log.SetLogger(zap.New(zap.UseDevMode(true)))
+	ctx := context.Background()
+
+	// Create test secrets
+	msaSecret1 := &corev1.Secret{
+		ObjectMeta: v1.ObjectMeta{
+			Name:      "auto-import-account-test1",
+			Namespace: "cluster1",
+			Labels: map[string]string{
+				msa_label: "true",
+			},
+		},
+	}
+
+	msaSecret2 := &corev1.Secret{
+		ObjectMeta: v1.ObjectMeta{
+			Name:      "auto-import-account-test2",
+			Namespace: "cluster2",
+			Labels: map[string]string{
+				msa_label: "true",
+			},
+		},
+	}
+
+	nonMsaSecret := &corev1.Secret{
+		ObjectMeta: v1.ObjectMeta{
+			Name:      "regular-secret",
+			Namespace: "cluster1",
+		},
+	}
+
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("Error adding corev1 to scheme: %s", err.Error())
+	}
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(msaSecret1, msaSecret2, nonMsaSecret).
+		Build()
+
+	type args struct {
+		ctx       context.Context
+		c         client.Client
+		namespace string
+	}
+	tests := []struct {
+		name          string
+		args          args
+		expectedCount int
+		expectedNames []string
+	}{
+		{
+			name: "should get all MSA secrets when namespace is empty",
+			args: args{
+				ctx:       ctx,
+				c:         k8sClient,
+				namespace: "",
+			},
+			expectedCount: 2,
+			expectedNames: []string{"auto-import-account-test1", "auto-import-account-test2"},
+		},
+		{
+			name: "should get MSA secrets from specific namespace",
+			args: args{
+				ctx:       ctx,
+				c:         k8sClient,
+				namespace: "cluster1",
+			},
+			expectedCount: 1,
+			expectedNames: []string{"auto-import-account-test1"},
+		},
+		{
+			name: "should return empty list for namespace with no MSA secrets",
+			args: args{
+				ctx:       ctx,
+				c:         k8sClient,
+				namespace: "empty-namespace",
+			},
+			expectedCount: 0,
+			expectedNames: []string{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			secrets := getMSASecrets(tt.args.ctx, tt.args.c, tt.args.namespace)
+
+			if len(secrets) != tt.expectedCount {
+				t.Errorf("Expected %d secrets, got %d", tt.expectedCount, len(secrets))
+			}
+
+			secretNames := make([]string, len(secrets))
+			for i, secret := range secrets {
+				secretNames[i] = secret.Name
+			}
+
+			for _, expectedName := range tt.expectedNames {
+				found := false
+				for _, actualName := range secretNames {
+					if actualName == expectedName {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("Expected to find secret %s, but it was not returned", expectedName)
+				}
+			}
+		})
+	}
+}
+
+func Test_updateAISecrets(t *testing.T) {
+	// Set up logger
+	log.SetLogger(zap.New(zap.UseDevMode(true)))
+	ctx := context.Background()
+
+	// Create test secrets with agent-install label
+	aiSecret1 := &corev1.Secret{
+		ObjectMeta: v1.ObjectMeta{
+			Name:      "ai-secret-1",
+			Namespace: "test-namespace",
+			Labels: map[string]string{
+				"agent-install.openshift.io/watch": "true",
+			},
+		},
+	}
+
+	aiSecret2 := &corev1.Secret{
+		ObjectMeta: v1.ObjectMeta{
+			Name:      "ai-secret-2",
+			Namespace: "test-namespace",
+			Labels: map[string]string{
+				"agent-install.openshift.io/watch": "true",
+			},
+		},
+	}
+
+	nonAiSecret := &corev1.Secret{
+		ObjectMeta: v1.ObjectMeta{
+			Name:      "regular-secret",
+			Namespace: "test-namespace",
+		},
+	}
+
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("Error adding corev1 to scheme: %s", err.Error())
+	}
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(aiSecret1, aiSecret2, nonAiSecret).
+		Build()
+
+	type args struct {
+		ctx context.Context
+		c   client.Client
+	}
+	tests := []struct {
+		name string
+		args args
+	}{
+		{
+			name: "should update AI secrets with backup labels",
+			args: args{
+				ctx: ctx,
+				c:   k8sClient,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Call the function under test
+			updateAISecrets(tt.args.ctx, tt.args.c)
+
+			// Verify AI secrets were updated with backup labels
+			updatedSecret1 := &corev1.Secret{}
+			err := k8sClient.Get(ctx, types.NamespacedName{
+				Name:      "ai-secret-1",
+				Namespace: "test-namespace",
+			}, updatedSecret1)
+			if err != nil {
+				t.Errorf("Failed to get updated AI secret 1: %v", err)
+			}
+
+			if updatedSecret1.Labels[backupCredsClusterLabel] != "agent-install" {
+				t.Errorf("Expected backup label 'agent-install' on AI secret 1, got %v",
+					updatedSecret1.Labels[backupCredsClusterLabel])
+			}
+
+			// Verify non-AI secret was not updated
+			unchangedSecret := &corev1.Secret{}
+			err = k8sClient.Get(ctx, types.NamespacedName{
+				Name:      "regular-secret",
+				Namespace: "test-namespace",
+			}, unchangedSecret)
+			if err != nil {
+				t.Errorf("Failed to get regular secret: %v", err)
+			}
+
+			if unchangedSecret.Labels[backupCredsClusterLabel] != "" {
+				t.Errorf("Regular secret should not have backup label, got %v",
+					unchangedSecret.Labels[backupCredsClusterLabel])
+			}
+		})
+	}
+}
+
+func Test_updateMetalSecrets(t *testing.T) {
+	// Set up logger
+	log.SetLogger(zap.New(zap.UseDevMode(true)))
+	ctx := context.Background()
+
+	// Create test secrets with metal3 label
+	metalSecret1 := &corev1.Secret{
+		ObjectMeta: v1.ObjectMeta{
+			Name:      "metal-secret-1",
+			Namespace: "test-namespace",
+			Labels: map[string]string{
+				"environment.metal3.io": "baremetal",
+			},
+		},
+	}
+
+	// Secret in openshift-machine-api namespace should be skipped
+	metalSecretSkipped := &corev1.Secret{
+		ObjectMeta: v1.ObjectMeta{
+			Name:      "metal-secret-skipped",
+			Namespace: "openshift-machine-api",
+			Labels: map[string]string{
+				"environment.metal3.io": "baremetal",
+			},
+		},
+	}
+
+	nonMetalSecret := &corev1.Secret{
+		ObjectMeta: v1.ObjectMeta{
+			Name:      "regular-secret",
+			Namespace: "test-namespace",
+		},
+	}
+
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("Error adding corev1 to scheme: %s", err.Error())
+	}
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(metalSecret1, metalSecretSkipped, nonMetalSecret).
+		Build()
+
+	type args struct {
+		ctx context.Context
+		c   client.Client
+	}
+	tests := []struct {
+		name string
+		args args
+	}{
+		{
+			name: "should update metal secrets with backup labels, skip openshift-machine-api namespace",
+			args: args{
+				ctx: ctx,
+				c:   k8sClient,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Call the function under test
+			updateMetalSecrets(tt.args.ctx, tt.args.c)
+
+			// Verify metal secret was updated with backup label
+			updatedSecret1 := &corev1.Secret{}
+			err := k8sClient.Get(ctx, types.NamespacedName{
+				Name:      "metal-secret-1",
+				Namespace: "test-namespace",
+			}, updatedSecret1)
+			if err != nil {
+				t.Errorf("Failed to get updated metal secret 1: %v", err)
+			}
+
+			if updatedSecret1.Labels[backupCredsClusterLabel] != "baremetal" {
+				t.Errorf("Expected backup label 'baremetal' on metal secret 1, got %v",
+					updatedSecret1.Labels[backupCredsClusterLabel])
+			}
+
+			// Verify secret in openshift-machine-api namespace was not updated
+			skippedSecret := &corev1.Secret{}
+			err = k8sClient.Get(ctx, types.NamespacedName{
+				Name:      "metal-secret-skipped",
+				Namespace: "openshift-machine-api",
+			}, skippedSecret)
+			if err != nil {
+				t.Errorf("Failed to get skipped metal secret: %v", err)
+			}
+
+			if skippedSecret.Labels[backupCredsClusterLabel] != "" {
+				t.Errorf("Skipped metal secret should not have backup label, got %v",
+					skippedSecret.Labels[backupCredsClusterLabel])
+			}
+
+			// Verify non-metal secret was not updated
+			unchangedSecret := &corev1.Secret{}
+			err = k8sClient.Get(ctx, types.NamespacedName{
+				Name:      "regular-secret",
+				Namespace: "test-namespace",
+			}, unchangedSecret)
+			if err != nil {
+				t.Errorf("Failed to get regular secret: %v", err)
+			}
+
+			if unchangedSecret.Labels[backupCredsClusterLabel] != "" {
+				t.Errorf("Regular secret should not have backup label, got %v",
+					unchangedSecret.Labels[backupCredsClusterLabel])
+			}
+		})
+	}
+}
+
+func Test_updateSecret(t *testing.T) {
+	// Set up logger
+	log.SetLogger(zap.New(zap.UseDevMode(true)))
+	ctx := context.Background()
+
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("Error adding corev1 to scheme: %s", err.Error())
+	}
+
+	// Create test secrets
+	secretWithoutLabels := corev1.Secret{
+		ObjectMeta: v1.ObjectMeta{
+			Name:      "secret-without-labels",
+			Namespace: "test-namespace",
+		},
+	}
+
+	secretWithExistingBackupLabel := corev1.Secret{
+		ObjectMeta: v1.ObjectMeta{
+			Name:      "secret-with-backup-label",
+			Namespace: "test-namespace",
+			Labels: map[string]string{
+				backupCredsClusterLabel: "existing-value",
+			},
+		},
+	}
+
+	secretWithHiveLabel := corev1.Secret{
+		ObjectMeta: v1.ObjectMeta{
+			Name:      "secret-with-hive-label",
+			Namespace: "test-namespace",
+			Labels: map[string]string{
+				backupCredsHiveLabel: "hive-value",
+			},
+		},
+	}
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(&secretWithExistingBackupLabel, &secretWithHiveLabel).
+		Build()
+
+	type args struct {
+		ctx        context.Context
+		c          client.Client
+		secret     corev1.Secret
+		labelName  string
+		labelValue string
+		update     bool
+	}
+	tests := []struct {
+		name         string
+		args         args
+		expectUpdate bool
+		expectLabel  bool
+	}{
+		{
+			name: "should add backup label to secret without existing backup labels",
+			args: args{
+				ctx:        ctx,
+				c:          k8sClient,
+				secret:     secretWithoutLabels,
+				labelName:  backupCredsClusterLabel,
+				labelValue: "test-value",
+				update:     false, // Don't call client.Update
+			},
+			expectUpdate: true,
+			expectLabel:  true,
+		},
+		{
+			name: "should not update secret that already has backup label",
+			args: args{
+				ctx:        ctx,
+				c:          k8sClient,
+				secret:     secretWithExistingBackupLabel,
+				labelName:  backupCredsClusterLabel,
+				labelValue: "new-value",
+				update:     false,
+			},
+			expectUpdate: false,
+			expectLabel:  false,
+		},
+		{
+			name: "should not update secret that has hive label",
+			args: args{
+				ctx:        ctx,
+				c:          k8sClient,
+				secret:     secretWithHiveLabel,
+				labelName:  backupCredsClusterLabel,
+				labelValue: "test-value",
+				update:     false,
+			},
+			expectUpdate: false,
+			expectLabel:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Make a copy of the secret to avoid modifying the original
+			secretCopy := tt.args.secret.DeepCopy()
+
+			result := updateSecret(tt.args.ctx, tt.args.c, *secretCopy,
+				tt.args.labelName, tt.args.labelValue, tt.args.update)
+
+			if result != tt.expectUpdate {
+				t.Errorf("Expected updateSecret to return %v, got %v", tt.expectUpdate, result)
 			}
 		})
 	}
