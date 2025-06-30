@@ -9,17 +9,14 @@ import (
 	"testing"
 	"time"
 
-	ocinfrav1 "github.com/openshift/api/config/v1"
 	v1beta1 "github.com/stolostron/cluster-backup-operator/api/v1beta1"
 	veleroapi "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	clusterv1 "open-cluster-management.io/api/cluster/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 func Test_getBackupTimestamp(t *testing.T) {
@@ -548,98 +545,61 @@ func Test_getHubIdentification(t *testing.T) {
 	crNoVersion := createClusterVersion("version", "", nil)
 	crWithVersion := createClusterVersion("version", "aaa", nil)
 
-	type args struct {
-		ctx          context.Context
-		c            client.Client
+	tests := []struct {
+		name         string
 		setupScheme  bool
 		setupObjects []client.Object
-	}
-	tests := []struct {
-		name     string
-		args     args
-		err_nil  bool
-		want_msg string
-		url      string
+		err_nil      bool
+		want_msg     string
 	}{
 		{
-			name: "no clusterversion scheme defined",
-			args: args{
-				ctx:          context.Background(),
-				setupScheme:  false,
-				setupObjects: []client.Object{},
-			},
-			err_nil:  false,
-			want_msg: "unknown",
+			name:         "no clusterversion scheme defined",
+			setupScheme:  false,
+			setupObjects: []client.Object{},
+			err_nil:      false,
+			want_msg:     "unknown",
 		},
 		{
-			name: "clusterversion scheme is defined but no resource",
-			args: args{
-				ctx:          context.Background(),
-				setupScheme:  true,
-				setupObjects: []client.Object{},
-			},
-			err_nil:  true,
-			want_msg: "unknown",
+			name:         "clusterversion scheme is defined but no resource",
+			setupScheme:  true,
+			setupObjects: []client.Object{},
+			err_nil:      true,
+			want_msg:     "unknown",
 		},
 		{
-			name: "clusterversion resource with no id",
-			args: args{
-				ctx:          context.Background(),
-				setupScheme:  true,
-				setupObjects: []client.Object{crNoVersion},
-			},
-			err_nil:  true,
-			want_msg: "",
+			name:         "clusterversion resource with no id",
+			setupScheme:  true,
+			setupObjects: []client.Object{crNoVersion},
+			err_nil:      true,
+			want_msg:     "",
 		},
 		{
-			name: "clusterversion resource with id",
-			args: args{
-				ctx:          context.Background(),
-				setupScheme:  true,
-				setupObjects: []client.Object{crWithVersion},
-			},
-			err_nil:  true,
-			want_msg: "aaa",
+			name:         "clusterversion resource with id",
+			setupScheme:  true,
+			setupObjects: []client.Object{crWithVersion},
+			err_nil:      true,
+			want_msg:     "aaa",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Setup scheme
-			testScheme := runtime.NewScheme()
-			if tt.args.setupScheme {
-				err := ocinfrav1.AddToScheme(testScheme)
-				if err != nil {
-					t.Fatalf("Error adding api to scheme: %s", err.Error())
-				}
+			fakeClient := CreateHubIdentificationTestClient(tt.setupScheme, tt.setupObjects...)
+
+			version, err := getHubIdentification(context.Background(), fakeClient)
+
+			if (err == nil) != tt.err_nil {
+				t.Errorf("getHubIdentification() error = %v, want error = %v", err, !tt.err_nil)
 			}
-
-			// Setup fake client
-			fakeClient := fake.NewClientBuilder().
-				WithScheme(testScheme).
-				WithObjects(tt.args.setupObjects...).
-				Build()
-
-			tt.args.c = fakeClient
-
-			if version, err := getHubIdentification(tt.args.ctx, tt.args.c); (err == nil) != tt.err_nil ||
-				version != tt.want_msg {
-				t.Errorf("getHubIdentification() returns no error = %v, want %v and version=%v want=%v",
-					err == nil, tt.err_nil, version, tt.want_msg)
+			if version != tt.want_msg {
+				t.Errorf("getHubIdentification() version = %v, want %v", version, tt.want_msg)
 			}
 		})
 	}
 }
 
 func Test_VeleroCRDsPresent_NotPresent(t *testing.T) {
-	// Setup scheme without velero types to simulate CRDs not present
-	testScheme := runtime.NewScheme()
-	// Deliberately not adding velero types to simulate CRDs not being installed
-
-	// Setup fake client without velero CRDs
-	fakeClient := fake.NewClientBuilder().
-		WithScheme(testScheme).
-		Build()
+	fakeClient := CreateVeleroCRDTestClient(false) // false = don't include velero scheme
 
 	t.Run("velero CRDs not present", func(t *testing.T) {
 		crdsPresent, err := VeleroCRDsPresent(context.Background(), fakeClient)
@@ -653,17 +613,7 @@ func Test_VeleroCRDsPresent_NotPresent(t *testing.T) {
 }
 
 func Test_VeleroCRDsPresent(t *testing.T) {
-	// Setup scheme with velero CRDs (to simulate CRDs present)
-	testScheme := runtime.NewScheme()
-	err := veleroapi.AddToScheme(testScheme) // for velero types
-	if err != nil {
-		t.Fatalf("Error adding api to scheme: %s", err.Error())
-	}
-
-	// Setup fake client with velero CRDs
-	fakeClient := fake.NewClientBuilder().
-		WithScheme(testScheme).
-		Build()
+	fakeClient := CreateVeleroCRDTestClient(true) // true = include velero scheme
 
 	t.Run("velero CRDs present", func(t *testing.T) {
 		crdsPresent, err := VeleroCRDsPresent(context.Background(), fakeClient)
@@ -1254,19 +1204,7 @@ func Test_updateBackupSchedulePhaseWhenPaused(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Setup scheme
-			testScheme := runtime.NewScheme()
-			if tt.args.setupScheme {
-				_ = veleroapi.AddToScheme(testScheme) // for velero types
-				_ = v1beta1.AddToScheme(testScheme)   // for acm backup types
-			}
-
-			// Setup fake client
-			fakeClient := fake.NewClientBuilder().
-				WithScheme(testScheme).
-				WithObjects(tt.args.setupObjects...).
-				Build()
-
+			fakeClient := CreateBackupSchedulePausedTestClient(tt.args.setupObjects...)
 			tt.args.c = fakeClient
 
 			returnValue, _ := updateBackupSchedulePhaseWhenPaused(tt.args.ctx, tt.args.c,

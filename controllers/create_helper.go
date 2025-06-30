@@ -1417,17 +1417,82 @@ func CreateTestScheduleWithLabels(name, namespace, backupScheduleName string) *v
 		object
 }
 
-// Example usage helper - demonstrates how to use VeleroTestObjects for common test scenarios
-func CreateRestoreHubTestObjects(namespaceName string) (*VeleroTestObjects, []*veleroapi.Backup) {
-	// Create the base objects
-	vto := CreateVeleroTestObjects(namespaceName, "acm-backup-schedule", "acm-restore-clusters")
+// Utils Test Helper Functions
 
-	// Create additional test backups with different cluster labels
-	backups := []*veleroapi.Backup{
-		CreateTestBackupWithLabels("acm-restore-clusters-1", namespaceName, "cluster1", "cluster1"), // Same hub
-		CreateTestBackupWithLabels("acm-restore-clusters-2", namespaceName, "cluster1", "cluster2"), // Different hub
-		CreateTestBackupWithLabels("acm-restore-clusters-3", namespaceName, "cluster1", "cluster2"), // Different hub
+// createUtilsTestScheme creates a scheme for utils tests with conditional API registration
+func createUtilsTestScheme(includeVelero, includeOCInfra, includeV1Beta1 bool) *runtime.Scheme {
+	testScheme := runtime.NewScheme()
+
+	// Always add core v1
+	corev1.AddToScheme(testScheme)
+
+	if includeVelero {
+		veleroapi.AddToScheme(testScheme)
 	}
 
-	return vto, backups
+	if includeOCInfra {
+		ocinfrav1.AddToScheme(testScheme)
+	}
+
+	if includeV1Beta1 {
+		v1beta1.AddToScheme(testScheme)
+	}
+
+	return testScheme
+}
+
+// CreateUtilsTestClient creates a fake client for utils tests with conditional scheme setup
+func CreateUtilsTestClient(includeVelero, includeOCInfra, includeV1Beta1 bool, objects ...client.Object) client.Client {
+	testScheme := createUtilsTestScheme(includeVelero, includeOCInfra, includeV1Beta1)
+
+	return fake.NewClientBuilder().
+		WithScheme(testScheme).
+		WithObjects(objects...).
+		Build()
+}
+
+// CreateHubIdentificationTestClient creates a fake client specifically for hub identification tests
+func CreateHubIdentificationTestClient(setupScheme bool, objects ...client.Object) client.Client {
+	return CreateUtilsTestClient(false, setupScheme, false, objects...)
+}
+
+// CreateVeleroCRDTestClient creates a fake client for VeleroCRDs tests
+func CreateVeleroCRDTestClient(includeVeleroScheme bool, objects ...client.Object) client.Client {
+	return CreateUtilsTestClient(includeVeleroScheme, false, false, objects...)
+}
+
+// CreateBackupSchedulePausedTestClient creates a fake client for backup schedule paused tests
+func CreateBackupSchedulePausedTestClient(objects ...client.Object) client.Client {
+	return CreateUtilsTestClient(true, false, true, objects...)
+}
+
+// UtilsTestCase represents a common test case structure for utils tests
+type UtilsTestCase struct {
+	Name         string
+	SetupScheme  bool
+	SetupObjects []client.Object
+	WantError    bool
+	WantResult   interface{}
+}
+
+// RunUtilsTestCase runs a utils test case with the provided test function
+func RunUtilsTestCase(t *testing.T, tc UtilsTestCase, includeVelero, includeOCInfra, includeV1Beta1 bool,
+	testFunc func(client.Client) (interface{}, error)) {
+
+	fakeClient := CreateUtilsTestClient(includeVelero && tc.SetupScheme,
+		includeOCInfra && tc.SetupScheme,
+		includeV1Beta1 && tc.SetupScheme,
+		tc.SetupObjects...)
+
+	result, err := testFunc(fakeClient)
+
+	if tc.WantError && err == nil {
+		t.Errorf("%s: expected error but got none", tc.Name)
+	}
+	if !tc.WantError && err != nil {
+		t.Errorf("%s: unexpected error: %v", tc.Name, err)
+	}
+	if tc.WantResult != nil && result != tc.WantResult {
+		t.Errorf("%s: expected result %v, got %v", tc.Name, tc.WantResult, result)
+	}
 }
