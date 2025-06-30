@@ -26,7 +26,6 @@ import (
 	"testing"
 	"time"
 
-	ocinfrav1 "github.com/openshift/api/config/v1"
 	backupv1beta1 "github.com/stolostron/cluster-backup-operator/api/v1beta1"
 	veleroapi "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -640,26 +639,8 @@ func Test_deleteVeleroSchedules(t *testing.T) {
 	}
 	for _, tt := range testsForSchedulesUpdateRequired {
 		t.Run(tt.name, func(t *testing.T) {
-			// Create a separate client for this test case to avoid state pollution
-			testObjects := []client.Object{&veleroNamespace}
-			if tt.name == "velero schedules is not empty, schedules are updated" ||
-				tt.name == "velero schedules is not empty, schedules are updated and NO CRDs found" ||
-				tt.name == "velero schedules is not empty, schedules are NOT updated but new CRDs found" ||
-				tt.name == "velero schedules is not empty, schedules are NOT updated but new CRDs found error on update" {
-				// Add the schedules for these test cases
-				for i := range veleroSchedulesUpdate.Items {
-					veleroSchedule := &veleroSchedulesUpdate.Items[i]
-					veleroSchedule.Namespace = veleroNamespaceName
-					testObjects = append(testObjects, veleroSchedule)
-				}
-			}
-
-			testClient := fake.NewClientBuilder().
-				WithScheme(testScheme).
-				WithObjects(testObjects...).
-				Build()
-
-			// Update the args to use the test-specific client
+			// Use helper function to create test client with conditional setup
+			testClient := CreateDeleteVeleroSchedulesTestClient(tt.name, &veleroNamespace, veleroSchedulesUpdate)
 			tt.args.c = testClient
 
 			_, got, err := isVeleroSchedulesUpdateRequired(tt.args.ctx, tt.args.c, tt.args.resourcesToBackup,
@@ -758,20 +739,8 @@ func Test_isRestoreRunning(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Setup scheme
-			testScheme := runtime.NewScheme()
-			if tt.setupScheme {
-				corev1.AddToScheme(testScheme)
-				veleroapi.AddToScheme(testScheme)
-				backupv1beta1.AddToScheme(testScheme)
-			}
-
-			// Setup fake client
-			fakeClient := fake.NewClientBuilder().
-				WithScheme(testScheme).
-				WithObjects(tt.setupObjects...).
-				Build()
-
+			// Use helper function to create test client
+			fakeClient := CreateScheduleTestClientWithScheme(tt.setupScheme, tt.setupObjects...)
 			tt.args.c = fakeClient
 
 			if got := isRestoreRunning(tt.args.ctx, tt.args.c,
@@ -858,18 +827,12 @@ func Test_createInitialBackupForSchedule(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Setup scheme
-			testScheme := runtime.NewScheme()
-			corev1.AddToScheme(testScheme)
-			veleroapi.AddToScheme(testScheme)
-
-			// Setup fake client
-			fakeClient := fake.NewClientBuilder().
-				WithScheme(testScheme).
-				WithObjects(tt.setupObjects...).
-				Build()
-
+			// Use helper function to create test client
+			fakeClient := CreateScheduleTestClient(tt.setupObjects...)
 			tt.args.c = fakeClient
+
+			// Get scheme for the function call
+			testScheme := createScheduleTestScheme()
 
 			if got_backup := createInitialBackupForSchedule(tt.args.ctx, tt.args.c, testScheme, tt.args.veleroSchedule,
 				tt.args.backupSchedule, timeStr); got_backup != tt.want_veleroBackup {
@@ -921,12 +884,8 @@ func Test_createFailedValidationResponse(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Setup fake client
-			testScheme := runtime.NewScheme()
-			fakeClient := fake.NewClientBuilder().
-				WithScheme(testScheme).
-				Build()
-
+			// Use helper function to create test client
+			fakeClient := CreateScheduleTestClientWithScheme(false) // No scheme needed for this test
 			tt.args.c = fakeClient
 
 			if r, _, _ := createFailedValidationResponse(tt.args.ctx, tt.args.c,
@@ -1182,24 +1141,14 @@ func Test_scheduleOwnsLatestStorageBackups(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Setup scheme
-			testScheme := runtime.NewScheme()
-			if tt.setupScheme {
-				veleroapi.AddToScheme(testScheme)
-			}
-
 			// Prepare setup objects
 			setupObjects := []client.Object{}
 			for i := range tt.resources {
 				setupObjects = append(setupObjects, tt.resources[i])
 			}
 
-			// Setup fake client
-			fakeClient := fake.NewClientBuilder().
-				WithScheme(testScheme).
-				WithObjects(setupObjects...).
-				Build()
-
+			// Use helper function to create test client
+			fakeClient := CreateScheduleTestClientWithScheme(tt.setupScheme, setupObjects...)
 			tt.args.c = fakeClient
 
 			if got, _, err := scheduleOwnsLatestStorageBackups(tt.args.ctx, tt.args.c,
@@ -1276,13 +1225,7 @@ func Test_isRestoreHubAfterSchedule(t *testing.T) {
 				&veleroNamespace,
 				crWithVersion,
 				createSchedule("acm-backup-schedule-3", veleroNamespaceName).object,
-				createBackup("acm-restore-clusters-2", veleroNamespaceName).
-					labels(map[string]string{
-						BackupScheduleClusterLabel: "cluster1",
-						RestoreClusterLabel:        "cluster2",
-					}).
-					phase(veleroapi.BackupPhaseCompleted).
-					object,
+				CreateTestBackupWithLabels("acm-restore-clusters-2", veleroNamespaceName, "cluster1", "cluster2"),
 			},
 		},
 		{
@@ -1305,13 +1248,7 @@ func Test_isRestoreHubAfterSchedule(t *testing.T) {
 			setupObjects: []client.Object{
 				&veleroNamespace,
 				crWithVersion,
-				createBackup("acm-restore-clusters-1", veleroNamespaceName).
-					labels(map[string]string{
-						BackupScheduleClusterLabel: "cluster1",
-						RestoreClusterLabel:        "cluster1",
-					}).
-					phase(veleroapi.BackupPhaseCompleted).
-					object,
+				CreateTestBackupWithLabels("acm-restore-clusters-1", veleroNamespaceName, "cluster1", "cluster1"),
 			},
 		},
 		{
@@ -1347,19 +1284,8 @@ func Test_isRestoreHubAfterSchedule(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Setup scheme
-			testScheme := runtime.NewScheme()
-			corev1.AddToScheme(testScheme)
-			backupv1beta1.AddToScheme(testScheme)
-			ocinfrav1.AddToScheme(testScheme)
-			veleroapi.AddToScheme(testScheme)
-
-			// Setup fake client
-			fakeClient := fake.NewClientBuilder().
-				WithScheme(testScheme).
-				WithObjects(tt.setupObjects...).
-				Build()
-
+			// Use helper function to create test client
+			fakeClient := CreateScheduleTestClient(tt.setupObjects...)
 			tt.args.c = fakeClient
 
 			if got, _ := isRestoreHubAfterSchedule(tt.args.ctx, tt.args.c,

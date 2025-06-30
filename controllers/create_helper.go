@@ -1272,3 +1272,162 @@ func CreateTestClientOrFail(t *testing.T, objects ...client.Object) client.Clien
 	AssertNoError(t, err, "Error creating test client")
 	return client
 }
+
+// Schedule Test Helper Functions
+
+// ScheduleTestScheme creates a scheme with all APIs needed for schedule tests
+func createScheduleTestScheme() *runtime.Scheme {
+	testScheme := runtime.NewScheme()
+	corev1.AddToScheme(testScheme)
+	veleroapi.AddToScheme(testScheme)
+	v1beta1.AddToScheme(testScheme)
+	ocinfrav1.AddToScheme(testScheme)
+	return testScheme
+}
+
+// CreateScheduleTestClient creates a fake client with schedule test scheme and objects
+func CreateScheduleTestClient(objects ...client.Object) client.Client {
+	return fake.NewClientBuilder().
+		WithScheme(createScheduleTestScheme()).
+		WithObjects(objects...).
+		Build()
+}
+
+// CreateScheduleTestClientWithScheme creates a fake client with conditional scheme setup
+func CreateScheduleTestClientWithScheme(setupScheme bool, objects ...client.Object) client.Client {
+	var testScheme *runtime.Scheme
+	if setupScheme {
+		testScheme = createScheduleTestScheme()
+	} else {
+		testScheme = runtime.NewScheme()
+	}
+
+	return fake.NewClientBuilder().
+		WithScheme(testScheme).
+		WithObjects(objects...).
+		Build()
+}
+
+// ScheduleTestCase represents a common test case structure for schedule tests
+type ScheduleTestCase struct {
+	Name         string
+	SetupObjects []client.Object
+	SetupScheme  bool
+	WantError    bool
+	WantResult   interface{}
+}
+
+// RunScheduleTestCase is a helper to run a common schedule test pattern
+func RunScheduleTestCase(t *testing.T, tc ScheduleTestCase, testFunc func(client.Client) (interface{}, error)) {
+	t.Run(tc.Name, func(t *testing.T) {
+		fakeClient := CreateScheduleTestClientWithScheme(tc.SetupScheme, tc.SetupObjects...)
+
+		result, err := testFunc(fakeClient)
+
+		if tc.WantError && err == nil {
+			t.Errorf("Expected error but got none")
+		}
+		if !tc.WantError && err != nil {
+			t.Errorf("Unexpected error: %v", err)
+		}
+		if tc.WantResult != nil && result != tc.WantResult {
+			t.Errorf("Expected result %v, got %v", tc.WantResult, result)
+		}
+	})
+}
+
+// VeleroTestObjects creates common velero test objects
+type VeleroTestObjects struct {
+	Namespace      *corev1.Namespace
+	ClusterVersion *ocinfrav1.ClusterVersion
+	Schedule       *veleroapi.Schedule
+	Backup         *veleroapi.Backup
+	BackupSchedule *v1beta1.BackupSchedule
+}
+
+// CreateVeleroTestObjects creates a set of common velero objects for testing
+func CreateVeleroTestObjects(namespaceName, scheduleName, backupName string) *VeleroTestObjects {
+	return &VeleroTestObjects{
+		Namespace:      createNamespace(namespaceName),
+		ClusterVersion: createClusterVersion("version", "cluster1", nil),
+		Schedule:       createSchedule(scheduleName, namespaceName).object,
+		Backup:         createBackup(backupName, namespaceName).object,
+		BackupSchedule: createBackupSchedule("test-schedule", namespaceName).object,
+	}
+}
+
+// AsObjects converts VeleroTestObjects to a slice of client.Object
+func (vto *VeleroTestObjects) AsObjects() []client.Object {
+	objects := []client.Object{}
+	if vto.Namespace != nil {
+		objects = append(objects, vto.Namespace)
+	}
+	if vto.ClusterVersion != nil {
+		objects = append(objects, vto.ClusterVersion)
+	}
+	if vto.Schedule != nil {
+		objects = append(objects, vto.Schedule)
+	}
+	if vto.Backup != nil {
+		objects = append(objects, vto.Backup)
+	}
+	if vto.BackupSchedule != nil {
+		objects = append(objects, vto.BackupSchedule)
+	}
+	return objects
+}
+
+// CreateDeleteVeleroSchedulesTestClient creates a client for deleteVeleroSchedules tests with conditional setup
+func CreateDeleteVeleroSchedulesTestClient(testName string, veleroNamespace *corev1.Namespace, veleroSchedules *veleroapi.ScheduleList) client.Client {
+	testObjects := []client.Object{veleroNamespace}
+
+	// Add schedules for specific test cases
+	if testName == "velero schedules is not empty, schedules are updated" ||
+		testName == "velero schedules is not empty, schedules are updated and NO CRDs found" ||
+		testName == "velero schedules is not empty, schedules are NOT updated but new CRDs found" ||
+		testName == "velero schedules is not empty, schedules are NOT updated but new CRDs found error on update" {
+
+		for i := range veleroSchedules.Items {
+			veleroSchedule := &veleroSchedules.Items[i]
+			veleroSchedule.Namespace = veleroNamespace.Name
+			testObjects = append(testObjects, veleroSchedule)
+		}
+	}
+
+	return CreateScheduleTestClient(testObjects...)
+}
+
+// CreateTestBackupWithLabels creates a backup with common test labels
+func CreateTestBackupWithLabels(name, namespace, clusterLabel, restoreLabel string) *veleroapi.Backup {
+	return createBackup(name, namespace).
+		labels(map[string]string{
+			BackupScheduleClusterLabel: clusterLabel,
+			RestoreClusterLabel:        restoreLabel,
+		}).
+		phase(veleroapi.BackupPhaseCompleted).
+		object
+}
+
+// CreateTestScheduleWithLabels creates a schedule with common test labels
+func CreateTestScheduleWithLabels(name, namespace, backupScheduleName string) *veleroapi.Schedule {
+	return createSchedule(name, namespace).
+		scheduleLabels(map[string]string{
+			BackupScheduleNameLabel: backupScheduleName,
+		}).
+		object
+}
+
+// Example usage helper - demonstrates how to use VeleroTestObjects for common test scenarios
+func CreateRestoreHubTestObjects(namespaceName string) (*VeleroTestObjects, []*veleroapi.Backup) {
+	// Create the base objects
+	vto := CreateVeleroTestObjects(namespaceName, "acm-backup-schedule", "acm-restore-clusters")
+
+	// Create additional test backups with different cluster labels
+	backups := []*veleroapi.Backup{
+		CreateTestBackupWithLabels("acm-restore-clusters-1", namespaceName, "cluster1", "cluster1"), // Same hub
+		CreateTestBackupWithLabels("acm-restore-clusters-2", namespaceName, "cluster1", "cluster2"), // Different hub
+		CreateTestBackupWithLabels("acm-restore-clusters-3", namespaceName, "cluster1", "cluster2"), // Different hub
+	}
+
+	return vto, backups
+}
