@@ -20,7 +20,6 @@ package controllers
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -57,17 +56,8 @@ func Test_postRestoreActivation(t *testing.T) {
 	autoImporSecretWithLabel := *createSecret(autoImportSecretName, "managed-activ-1",
 		map[string]string{activateLabel: "true"}, nil, nil)
 
-	scheme1 := runtime.NewScheme()
-	e1 := corev1.AddToScheme(scheme1)
-	e2 := clusterv1.AddToScheme(scheme1)
-	if err := errors.Join(e1, e2); err != nil {
-		t.Fatalf("Error adding apis to scheme: %s", err.Error())
-	}
-
-	k8sClient1 := fake.NewClientBuilder().
-		WithScheme(scheme1).
-		WithObjects(&ns1, &ns2, &autoImporSecretWithLabel).
-		Build()
+	// Use helper function for client setup
+	k8sClient1 := CreateTestClientOrFail(t, &ns1, &ns2, &autoImporSecretWithLabel)
 
 	fourHoursAgo := "2022-07-26T11:25:34Z"
 	nextTenHours := "2022-07-27T04:25:34Z"
@@ -235,23 +225,12 @@ func Test_postRestoreActivation(t *testing.T) {
 }
 
 func Test_executePostRestoreTasks(t *testing.T) {
-	scheme1 := runtime.NewScheme()
-	schemeErrs := []error{}
-	schemeErrs = append(schemeErrs, veleroapi.AddToScheme(scheme1))
-	schemeErrs = append(schemeErrs, clusterv1.AddToScheme(scheme1))
-	schemeErrs = append(schemeErrs, corev1.AddToScheme(scheme1))
-	if err := errors.Join(schemeErrs...); err != nil {
-		t.Fatalf("Error adding api(s) to scheme: %s", err.Error())
-	}
-
-	k8sClient1 := fake.NewClientBuilder().
-		WithScheme(scheme1).
-		WithObjects(
-			createNamespace("velero-ns"),
-			createNamespace(obs_addon_ns),
-			createSecret(obs_secret_name, obs_addon_ns, map[string]string{}, nil, nil),
-		).
-		Build()
+	// Use helper function for client setup
+	k8sClient1 := CreateTestClientOrFail(t,
+		createNamespace("velero-ns"),
+		createNamespace(obs_addon_ns),
+		createSecret(obs_secret_name, obs_addon_ns, map[string]string{}, nil, nil),
+	)
 
 	type args struct {
 		ctx     context.Context
@@ -1437,332 +1416,94 @@ func Test_cleanupDeltaForCredentials(t *testing.T) {
 func Test_cleanupDeltaForResourcesAndClustersBackup(t *testing.T) {
 	log.SetLogger(zap.New())
 
-	scheme1 := runtime.NewScheme()
-	err := veleroapi.AddToScheme(scheme1)
-	if err != nil {
-		t.Fatalf("Error adding api to scheme: %s", err.Error())
+	// Use helper function for scheme setup
+	scheme1, err := setupTestScheme()
+	AssertNoError(t, err, "Error setting up test scheme")
+
+	// Use helper function for backup setup
+	backupSetup := createTestBackupSetup()
+
+	// Use the pre-configured backup objects
+	resourcesBackup := backupSetup.ResourcesBackup
+	genericBackup := backupSetup.GenericBackup
+	genericBackupOld := backupSetup.GenericBackupOld
+	clustersBackup := backupSetup.ClustersBackup
+	clustersBackupOld := backupSetup.ClustersBackupOld
+
+	clusterNamespace := backupSetup.ClusterNamespace
+	namespaceName := backupSetup.NamespaceName
+
+	// Get backup names for compatibility with existing test logic
+	veleroResourcesBackupName := backupSetup.VeleroResourcesBackupName
+	veleroResourcesBackupNameOlder := veleroScheduleNames[Resources] + "-" + backupSetup.TenHourAgoTime
+	veleroGenericBackupName := backupSetup.VeleroGenericBackupName
+	veleroGenericBackupNameOlder := backupSetup.VeleroGenericBackupNameOlder
+	veleroClustersBackupName := backupSetup.VeleroClustersBackupName
+	veleroClustersBackupNameOlder := backupSetup.VeleroClustersBackupNameOlder
+
+	// Namespace objects are created by the test setup but not used directly in test cases
+
+	// Use helper functions for ManagedCluster creation
+	cls_with_backup_label_same := withBackupLabel(
+		createManagedClusterUnstructured("cls-with-backup-label-same", "default"),
+		clustersBackup.Name)
+	cls_with_backup_label_diff_excl_ns := withBackupLabel(
+		createManagedClusterUnstructured("cls-with-backup-label-diff-excl-ns", "local-cluster"),
+		backupSetup.VeleroClustersBackupNameOlder)
+	cls_with_backup_label_diff := withFinalizers(withBackupLabel(
+		createManagedClusterUnstructured("channel-with-backup-label-diff", "default"),
+		backupSetup.VeleroClustersBackupNameOlder),
+		[]string{"hive.openshift.io/deprovision"})
+	cls_with_no_backup_label := createManagedClusterUnstructured("cls-with-no-backup-label", "default")
+
+	// Use helper functions for Channel creation
+	channel_with_backup_label_same := withBackupLabel(
+		createChannelUnstructured("channel-with-backup-label-same", "default"),
+		resourcesBackup.Name)
+	channel_with_backup_label_diff_excl_ns := withBackupLabel(
+		createChannelUnstructured("channel-with-backup-label-diff-excl-ns", "local-cluster"),
+		backupSetup.VeleroResourcesBackupName+"-"+backupSetup.TenHourAgoTime)
+	channel_with_backup_label_diff := withFinalizers(withBackupLabel(
+		createChannelUnstructured("channel-with-backup-label-diff", "default"),
+		backupSetup.VeleroResourcesBackupName+"-"+backupSetup.TenHourAgoTime),
+		[]string{"hive.openshift.io/deprovision"})
+	channel_with_backup_label_generic := withGenericLabel(withBackupLabel(
+		createChannelUnstructured("channel-with-backup-label-generic", "default"),
+		veleroResourcesBackupName))
+	channel_with_no_backup_label := createChannelUnstructured("channel-with-no-backup-label", "default")
+	msaObj := createMSAUnstructured("auto-import-account", clusterNamespace)
+
+	channel_with_backup_label_generic_match := withGenericLabel(withBackupLabel(
+		createChannelUnstructured("channel-with-backup-label-generic-match", "default"),
+		veleroGenericBackupName))
+	channel_with_backup_label_generic_old := withGenericLabel(withBackupLabel(
+		createChannelUnstructured("channel-with-backup-label-generic-match-old", "default"),
+		veleroGenericBackupNameOlder))
+
+	// Create channels with activation labels
+	channel_with_backup_label_generic_match_activ := withBackupLabel(
+		createChannelUnstructured("channel-with-backup-label-generic-match-activ", "default"),
+		veleroGenericBackupName)
+	// Add activation label manually since we don't have a helper for it
+	labels := channel_with_backup_label_generic_match_activ.GetLabels()
+	if labels == nil {
+		labels = make(map[string]string)
 	}
-	err = clusterv1.AddToScheme(scheme1)
-	if err != nil {
-		t.Fatalf("Error adding api to scheme: %s", err.Error())
+	labels[backupCredsClusterLabel] = ClusterActivationLabel
+	channel_with_backup_label_generic_match_activ.SetLabels(labels)
+
+	channel_with_backup_label_generic_old_activ := withBackupLabel(
+		createChannelUnstructured("channel-with-backup-label-generic-old-activ", "default"),
+		veleroGenericBackupNameOlder)
+	// Add activation label manually
+	labels = channel_with_backup_label_generic_old_activ.GetLabels()
+	if labels == nil {
+		labels = make(map[string]string)
 	}
-	err = corev1.AddToScheme(scheme1)
-	if err != nil {
-		t.Fatalf("Error adding api to scheme: %s", err.Error())
-	}
+	labels[backupCredsClusterLabel] = ClusterActivationLabel
+	channel_with_backup_label_generic_old_activ.SetLabels(labels)
 
-	clusterNamespace := "managed1"
-	namespaceName := "open-cluster-management-backup"
-	timeNow, _ := time.Parse(time.RFC3339, "2022-07-26T15:25:34Z")
-	rightNow := metav1.NewTime(timeNow)
-	tenHourAgo := rightNow.Add(-10 * time.Hour)
-	aFewSecondsAgo := rightNow.Add(-2 * time.Second)
-
-	currentTime := rightNow.Format("20060102150405")
-	tenHourAgoTime := tenHourAgo.Format("20060102150405")
-	aFewSecondsAgoTime := aFewSecondsAgo.Format("20060102150405")
-
-	veleroResourcesBackupNameOlder := veleroScheduleNames[Resources] + "-" + tenHourAgoTime
-	veleroResourcesBackupName := veleroScheduleNames[Resources] + "-" + currentTime
-
-	veleroGenericBackupNameOlder := veleroScheduleNames[ResourcesGeneric] + "-" + tenHourAgoTime
-	veleroGenericBackupName := veleroScheduleNames[ResourcesGeneric] + "-" + aFewSecondsAgoTime
-
-	veleroClustersBackupNameOlder := veleroScheduleNames[ManagedClusters] + "-" + tenHourAgoTime
-	veleroClustersBackupName := veleroScheduleNames[ManagedClusters] + "-" + aFewSecondsAgoTime
-
-	// create a resources backup
-	resources := []string{
-		"crd-not-found.apps.open-cluster-management.io",
-		"channel.apps.open-cluster-management.io",
-	}
-	resources = append(resources, backupResources...)
-
-	resourcesBackup := *createBackup(veleroResourcesBackupName, namespaceName).
-		includedResources(resources).
-		startTimestamp(rightNow).
-		excludedNamespaces([]string{"local-cluster", "open-cluster-management-backup"}).
-		labels(map[string]string{
-			BackupScheduleTypeLabel: string(Resources),
-		}).
-		phase(veleroapi.BackupPhaseCompleted).
-		object
-
-	genericBackup := *createBackup(veleroGenericBackupName, namespaceName).
-		excludedResources(backupManagedClusterResources).
-		startTimestamp(metav1.NewTime(aFewSecondsAgo)).
-		labels(map[string]string{
-			BackupScheduleTypeLabel: string(ResourcesGeneric),
-		}).
-		phase(veleroapi.BackupPhaseCompleted).
-		object
-
-	genericBackupOld := *createBackup(veleroGenericBackupNameOlder, namespaceName).
-		excludedResources(backupManagedClusterResources).
-		startTimestamp(metav1.NewTime(tenHourAgo)).
-		labels(map[string]string{
-			BackupScheduleTypeLabel: string(ResourcesGeneric),
-		}).
-		object
-
-	clustersBackup := *createBackup(veleroClustersBackupName, namespaceName).
-		includedResources(backupManagedClusterResources).
-		excludedNamespaces([]string{"local-cluster"}).
-		startTimestamp(metav1.NewTime(aFewSecondsAgo)).
-		labels(map[string]string{
-			BackupScheduleTypeLabel: string(ManagedClusters),
-		}).
-		phase(veleroapi.BackupPhaseCompleted).
-		object
-
-	clustersBackupOld := *createBackup(veleroClustersBackupNameOlder, namespaceName).
-		includedResources(backupManagedClusterResources).
-		excludedNamespaces([]string{"local-cluster"}).
-		startTimestamp(metav1.NewTime(tenHourAgo)).
-		labels(map[string]string{
-			BackupScheduleTypeLabel: string(ManagedClusters),
-		}).
-		object
-
-	res_NS := &unstructured.Unstructured{}
-	res_NS.SetUnstructuredContent(map[string]interface{}{
-		"apiVersion": "v1",
-		"kind":       "Namespace",
-		"metadata": map[string]interface{}{
-			"name": namespaceName,
-		},
-	})
-
-	msa_NS := &unstructured.Unstructured{}
-	msa_NS.SetUnstructuredContent(map[string]interface{}{
-		"apiVersion": "v1",
-		"kind":       "Namespace",
-		"metadata": map[string]interface{}{
-			"name": clusterNamespace,
-		},
-	})
-
-	cls_with_backup_label_same := &unstructured.Unstructured{}
-	cls_with_backup_label_same.SetUnstructuredContent(map[string]interface{}{
-		"apiVersion": "cluster.open-cluster-management.io/v1beta1",
-		"kind":       "ManagedCluster",
-		"metadata": map[string]interface{}{
-			"name":      "cls-with-backup-label-same",
-			"namespace": "default",
-			"labels": map[string]interface{}{
-				BackupNameVeleroLabel: clustersBackup.Name,
-			},
-		},
-	})
-	cls_with_backup_label_diff_excl_ns := &unstructured.Unstructured{}
-	cls_with_backup_label_diff_excl_ns.SetUnstructuredContent(map[string]interface{}{
-		"apiVersion": "cluster.open-cluster-management.io/v1beta1",
-		"kind":       "ManagedCluster",
-		"metadata": map[string]interface{}{
-			"name":      "cls-with-backup-label-diff-excl-ns",
-			"namespace": "local-cluster",
-			"labels": map[string]interface{}{
-				BackupNameVeleroLabel: veleroClustersBackupNameOlder,
-			},
-		},
-	})
-	cls_with_backup_label_diff := &unstructured.Unstructured{}
-	cls_with_backup_label_diff.SetUnstructuredContent(map[string]interface{}{
-		"apiVersion": "cluster.open-cluster-management.io/v1beta1",
-		"kind":       "ManagedCluster",
-		"metadata": map[string]interface{}{
-			"name":      "channel-with-backup-label-diff",
-			"namespace": "default",
-			"labels": map[string]interface{}{
-				BackupNameVeleroLabel: veleroClustersBackupNameOlder,
-			},
-			"finalizers": []interface{}{"hive.openshift.io/deprovision"},
-		},
-	})
-
-	cls_with_no_backup_label := &unstructured.Unstructured{}
-	cls_with_no_backup_label.SetUnstructuredContent(map[string]interface{}{
-		"apiVersion": "cluster.open-cluster-management.io/v1beta1",
-		"kind":       "ManagedCluster",
-		"metadata": map[string]interface{}{
-			"name":      "cls-with-no-backup-label",
-			"namespace": "default",
-		},
-	})
-
-	channel_with_backup_label_same := &unstructured.Unstructured{}
-	channel_with_backup_label_same.SetUnstructuredContent(map[string]interface{}{
-		"apiVersion": "apps.open-cluster-management.io/v1beta1",
-		"kind":       "Channel",
-		"metadata": map[string]interface{}{
-			"name":      "channel-with-backup-label-same",
-			"namespace": "default",
-			"labels": map[string]interface{}{
-				BackupNameVeleroLabel: resourcesBackup.Name,
-			},
-		},
-		"spec": map[string]interface{}{
-			"type":     "Git",
-			"pathname": "https://github.com/test/app-samples",
-		},
-	})
-	channel_with_backup_label_diff_excl_ns := &unstructured.Unstructured{}
-	channel_with_backup_label_diff_excl_ns.SetUnstructuredContent(map[string]interface{}{
-		"apiVersion": "apps.open-cluster-management.io/v1beta1",
-		"kind":       "Channel",
-		"metadata": map[string]interface{}{
-			"name":      "channel-with-backup-label-diff-excl-ns",
-			"namespace": "local-cluster",
-			"labels": map[string]interface{}{
-				BackupNameVeleroLabel: veleroResourcesBackupNameOlder,
-			},
-		},
-		"spec": map[string]interface{}{
-			"type":     "Git",
-			"pathname": "https://github.com/test/app-samples",
-		},
-	})
-	channel_with_backup_label_diff := &unstructured.Unstructured{}
-	channel_with_backup_label_diff.SetUnstructuredContent(map[string]interface{}{
-		"apiVersion": "apps.open-cluster-management.io/v1beta1",
-		"kind":       "Channel",
-		"metadata": map[string]interface{}{
-			"name":      "channel-with-backup-label-diff",
-			"namespace": "default",
-			"labels": map[string]interface{}{
-				BackupNameVeleroLabel: veleroResourcesBackupNameOlder,
-			},
-			"finalizers": []interface{}{"hive.openshift.io/deprovision"},
-		},
-		"spec": map[string]interface{}{
-			"type":     "Git",
-			"pathname": "https://github.com/test/app-samples",
-		},
-	})
-	channel_with_backup_label_generic := &unstructured.Unstructured{}
-	channel_with_backup_label_generic.SetUnstructuredContent(map[string]interface{}{
-		"apiVersion": "apps.open-cluster-management.io/v1beta1",
-		"kind":       "Channel",
-		"metadata": map[string]interface{}{
-			"name":      "channel-with-backup-label-generic",
-			"namespace": "default",
-			"labels": map[string]interface{}{
-				BackupNameVeleroLabel:   veleroResourcesBackupName,
-				backupCredsClusterLabel: "i-am-a-generic-resource",
-			},
-		},
-		"spec": map[string]interface{}{
-			"type":     "Git",
-			"pathname": "https://github.com/test/app-samples",
-		},
-	})
-
-	channel_with_no_backup_label := &unstructured.Unstructured{}
-	channel_with_no_backup_label.SetUnstructuredContent(map[string]interface{}{
-		"apiVersion": "apps.open-cluster-management.io/v1beta1",
-		"kind":       "Channel",
-		"metadata": map[string]interface{}{
-			"name":      "channel-with-no-backup-label",
-			"namespace": "default",
-		},
-		"spec": map[string]interface{}{
-			"type":     "Git",
-			"pathname": "https://github.com/test/app-samples",
-		},
-	})
-
-	msaObj := &unstructured.Unstructured{}
-	msaObj.SetUnstructuredContent(map[string]interface{}{
-		"apiVersion": "authentication.open-cluster-management.io/v1beta1",
-		"kind":       "ManagedServiceAccount",
-		"metadata": map[string]interface{}{
-			"name":      "auto-import-account",
-			"namespace": clusterNamespace,
-			"labels": map[string]interface{}{
-				msa_label: msa_service_name,
-			},
-		},
-		"spec": map[string]interface{}{
-			"somethingelse": "aaa",
-			"rotation": map[string]interface{}{
-				"validity": "50h",
-				"enabled":  true,
-			},
-		},
-	})
-
-	channel_with_backup_label_generic_match := &unstructured.Unstructured{}
-	channel_with_backup_label_generic_match.SetUnstructuredContent(map[string]interface{}{
-		"apiVersion": "apps.open-cluster-management.io/v1beta1",
-		"kind":       "Channel",
-		"metadata": map[string]interface{}{
-			"name":      "channel-with-backup-label-generic-match",
-			"namespace": "default",
-			"labels": map[string]interface{}{
-				BackupNameVeleroLabel:   veleroGenericBackupName,
-				backupCredsClusterLabel: "i-am-a-generic-resource",
-			},
-		},
-		"spec": map[string]interface{}{
-			"type":     "Git",
-			"pathname": "https://github.com/test/app-samples",
-		},
-	})
-
-	channel_with_backup_label_generic_old := &unstructured.Unstructured{}
-	channel_with_backup_label_generic_old.SetUnstructuredContent(map[string]interface{}{
-		"apiVersion": "apps.open-cluster-management.io/v1beta1",
-		"kind":       "Channel",
-		"metadata": map[string]interface{}{
-			"name":      "channel-with-backup-label-generic-match-old",
-			"namespace": "default",
-			"labels": map[string]interface{}{
-				BackupNameVeleroLabel:   veleroGenericBackupNameOlder,
-				backupCredsClusterLabel: "i-am-a-generic-resource",
-			},
-		},
-		"spec": map[string]interface{}{
-			"type":     "Git",
-			"pathname": "https://github.com/test/app-samples",
-		},
-	})
-
-	channel_with_backup_label_generic_match_activ := &unstructured.Unstructured{}
-	channel_with_backup_label_generic_match_activ.SetUnstructuredContent(map[string]interface{}{
-		"apiVersion": "apps.open-cluster-management.io/v1beta1",
-		"kind":       "Channel",
-		"metadata": map[string]interface{}{
-			"name":      "channel-with-backup-label-generic-match-activ",
-			"namespace": "default",
-			"labels": map[string]interface{}{
-				BackupNameVeleroLabel:   veleroGenericBackupName,
-				backupCredsClusterLabel: ClusterActivationLabel,
-			},
-		},
-		"spec": map[string]interface{}{
-			"type":     "Git",
-			"pathname": "https://github.com/test/app-samples",
-		},
-	})
-
-	channel_with_backup_label_generic_old_activ := &unstructured.Unstructured{}
-	channel_with_backup_label_generic_old_activ.SetUnstructuredContent(map[string]interface{}{
-		"apiVersion": "apps.open-cluster-management.io/v1beta1",
-		"kind":       "Channel",
-		"metadata": map[string]interface{}{
-			"name":      "channel-with-backup-label-generic-old-activ",
-			"namespace": "default",
-			"labels": map[string]interface{}{
-				BackupNameVeleroLabel:   veleroGenericBackupNameOlder,
-				backupCredsClusterLabel: ClusterActivationLabel,
-			},
-		},
-		"spec": map[string]interface{}{
-			"type":     "Git",
-			"pathname": "https://github.com/test/app-samples",
-		},
-	})
-
+	// Create ClusterVersion object (no helper function available, keep manual creation)
 	clsvObj := &unstructured.Unstructured{}
 	clsvObj.SetUnstructuredContent(map[string]interface{}{
 		"apiVersion": "config.openshift.io/v1",

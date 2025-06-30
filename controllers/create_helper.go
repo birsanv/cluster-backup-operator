@@ -3,14 +3,17 @@ package controllers
 import (
 	"context"
 	"fmt"
+	"testing"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	. "github.com/onsi/gomega" //nolint:staticcheck
 	ocinfrav1 "github.com/openshift/api/config/v1"
@@ -1031,4 +1034,236 @@ func createAndVerifyResources(ctx context.Context, k8sClient client.Client, reso
 	for i := range resources {
 		Expect(k8sClient.Create(ctx, resources[i])).Should(Succeed())
 	}
+}
+
+// ChannelUnstructuredHelper creates unstructured Channel objects for testing
+func createChannelUnstructured(name, namespace string) *unstructured.Unstructured {
+	channel := &unstructured.Unstructured{}
+	channel.SetUnstructuredContent(map[string]interface{}{
+		"apiVersion": "apps.open-cluster-management.io/v1beta1",
+		"kind":       "Channel",
+		"metadata": map[string]interface{}{
+			"name":      name,
+			"namespace": namespace,
+		},
+		"spec": map[string]interface{}{
+			"type":     "Git",
+			"pathname": "https://github.com/test/app-samples",
+		},
+	})
+	return channel
+}
+
+func withBackupLabel(obj *unstructured.Unstructured, backupName string) *unstructured.Unstructured {
+	labels := obj.GetLabels()
+	if labels == nil {
+		labels = make(map[string]string)
+	}
+	labels[BackupNameVeleroLabel] = backupName
+	obj.SetLabels(labels)
+	return obj
+}
+
+func withFinalizers(obj *unstructured.Unstructured, finalizers []string) *unstructured.Unstructured {
+	obj.SetFinalizers(finalizers)
+	return obj
+}
+
+func withGenericLabel(obj *unstructured.Unstructured) *unstructured.Unstructured {
+	labels := obj.GetLabels()
+	if labels == nil {
+		labels = make(map[string]string)
+	}
+	labels[backupCredsClusterLabel] = "i-am-a-generic-resource"
+	obj.SetLabels(labels)
+	return obj
+}
+
+// ManagedClusterUnstructuredHelper creates unstructured ManagedCluster objects for testing
+func createManagedClusterUnstructured(name, namespace string) *unstructured.Unstructured {
+	cluster := &unstructured.Unstructured{}
+	cluster.SetUnstructuredContent(map[string]interface{}{
+		"apiVersion": "cluster.open-cluster-management.io/v1beta1",
+		"kind":       "ManagedCluster",
+		"metadata": map[string]interface{}{
+			"name":      name,
+			"namespace": namespace,
+		},
+	})
+	return cluster
+}
+
+// MSAUnstructuredHelper creates unstructured ManagedServiceAccount objects for testing
+func createMSAUnstructured(name, namespace string) *unstructured.Unstructured {
+	msa := &unstructured.Unstructured{}
+	msa.SetUnstructuredContent(map[string]interface{}{
+		"apiVersion": "authentication.open-cluster-management.io/v1beta1",
+		"kind":       "ManagedServiceAccount",
+		"metadata": map[string]interface{}{
+			"name":      name,
+			"namespace": namespace,
+			"labels": map[string]interface{}{
+				msa_label: msa_service_name,
+			},
+		},
+		"spec": map[string]interface{}{
+			"somethingelse": "aaa",
+			"rotation": map[string]interface{}{
+				"validity": "50h",
+				"enabled":  true,
+			},
+		},
+	})
+	return msa
+}
+
+// NamespaceUnstructuredHelper creates unstructured Namespace objects for testing
+func createNamespaceUnstructured(name string) *unstructured.Unstructured {
+	ns := &unstructured.Unstructured{}
+	ns.SetUnstructuredContent(map[string]interface{}{
+		"apiVersion": "v1",
+		"kind":       "Namespace",
+		"metadata": map[string]interface{}{
+			"name": name,
+		},
+	})
+	return ns
+}
+
+// TestSchemeSetup creates a common scheme with all necessary APIs for testing
+func setupTestScheme() (*runtime.Scheme, error) {
+	scheme := runtime.NewScheme()
+
+	if err := veleroapi.AddToScheme(scheme); err != nil {
+		return nil, err
+	}
+	if err := clusterv1.AddToScheme(scheme); err != nil {
+		return nil, err
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		return nil, err
+	}
+	if err := chnv1.AddToScheme(scheme); err != nil {
+		return nil, err
+	}
+
+	return scheme, nil
+}
+
+// TestBackupSetup creates common backup objects for testing
+type TestBackupSetup struct {
+	ResourcesBackup               veleroapi.Backup
+	GenericBackup                 veleroapi.Backup
+	GenericBackupOld              veleroapi.Backup
+	ClustersBackup                veleroapi.Backup
+	ClustersBackupOld             veleroapi.Backup
+	NamespaceName                 string
+	ClusterNamespace              string
+	CurrentTime                   string
+	TenHourAgoTime                string
+	AFewSecondsAgoTime            string
+	VeleroResourcesBackupName     string
+	VeleroGenericBackupName       string
+	VeleroGenericBackupNameOlder  string
+	VeleroClustersBackupName      string
+	VeleroClustersBackupNameOlder string
+}
+
+func createTestBackupSetup() *TestBackupSetup {
+	namespaceName := "open-cluster-management-backup"
+	clusterNamespace := "managed1"
+
+	timeNow, _ := time.Parse(time.RFC3339, "2022-07-26T15:25:34Z")
+	rightNow := metav1.NewTime(timeNow)
+	tenHourAgo := rightNow.Add(-10 * time.Hour)
+	aFewSecondsAgo := rightNow.Add(-2 * time.Second)
+
+	currentTime := rightNow.Format("20060102150405")
+	tenHourAgoTime := tenHourAgo.Format("20060102150405")
+	aFewSecondsAgoTime := aFewSecondsAgo.Format("20060102150405")
+
+	veleroResourcesBackupName := veleroScheduleNames[Resources] + "-" + currentTime
+	veleroGenericBackupName := veleroScheduleNames[ResourcesGeneric] + "-" + aFewSecondsAgoTime
+	veleroGenericBackupNameOlder := veleroScheduleNames[ResourcesGeneric] + "-" + tenHourAgoTime
+	veleroClustersBackupName := veleroScheduleNames[ManagedClusters] + "-" + aFewSecondsAgoTime
+	veleroClustersBackupNameOlder := veleroScheduleNames[ManagedClusters] + "-" + tenHourAgoTime
+
+	resources := []string{
+		"crd-not-found.apps.open-cluster-management.io",
+		"channel.apps.open-cluster-management.io",
+	}
+	resources = append(resources, backupResources...)
+
+	return &TestBackupSetup{
+		ResourcesBackup: *createBackup(veleroResourcesBackupName, namespaceName).
+			includedResources(resources).
+			startTimestamp(rightNow).
+			excludedNamespaces([]string{"local-cluster", "open-cluster-management-backup"}).
+			labels(map[string]string{BackupScheduleTypeLabel: string(Resources)}).
+			phase(veleroapi.BackupPhaseCompleted).object,
+
+		GenericBackup: *createBackup(veleroGenericBackupName, namespaceName).
+			excludedResources(backupManagedClusterResources).
+			startTimestamp(metav1.NewTime(aFewSecondsAgo)).
+			labels(map[string]string{BackupScheduleTypeLabel: string(ResourcesGeneric)}).
+			phase(veleroapi.BackupPhaseCompleted).object,
+
+		GenericBackupOld: *createBackup(veleroGenericBackupNameOlder, namespaceName).
+			excludedResources(backupManagedClusterResources).
+			startTimestamp(metav1.NewTime(tenHourAgo)).
+			labels(map[string]string{BackupScheduleTypeLabel: string(ResourcesGeneric)}).object,
+
+		ClustersBackup: *createBackup(veleroClustersBackupName, namespaceName).
+			includedResources(backupManagedClusterResources).
+			excludedNamespaces([]string{"local-cluster"}).
+			startTimestamp(metav1.NewTime(aFewSecondsAgo)).
+			labels(map[string]string{BackupScheduleTypeLabel: string(ManagedClusters)}).
+			phase(veleroapi.BackupPhaseCompleted).object,
+
+		ClustersBackupOld: *createBackup(veleroClustersBackupNameOlder, namespaceName).
+			includedResources(backupManagedClusterResources).
+			excludedNamespaces([]string{"local-cluster"}).
+			startTimestamp(metav1.NewTime(tenHourAgo)).
+			labels(map[string]string{BackupScheduleTypeLabel: string(ManagedClusters)}).object,
+
+		NamespaceName:                 namespaceName,
+		ClusterNamespace:              clusterNamespace,
+		CurrentTime:                   currentTime,
+		TenHourAgoTime:                tenHourAgoTime,
+		AFewSecondsAgoTime:            aFewSecondsAgoTime,
+		VeleroResourcesBackupName:     veleroResourcesBackupName,
+		VeleroGenericBackupName:       veleroGenericBackupName,
+		VeleroGenericBackupNameOlder:  veleroGenericBackupNameOlder,
+		VeleroClustersBackupName:      veleroClustersBackupName,
+		VeleroClustersBackupNameOlder: veleroClustersBackupNameOlder,
+	}
+}
+
+// Test helper functions to reduce repetitive patterns
+
+// AssertNoError is a helper to reduce repetitive error checking in tests
+func AssertNoError(t *testing.T, err error, message string) {
+	if err != nil {
+		t.Fatalf("%s: %s", message, err.Error())
+	}
+}
+
+// CreateTestClient creates a fake client with common scheme setup
+func CreateTestClient(objects ...client.Object) (client.Client, error) {
+	scheme, err := setupTestScheme()
+	if err != nil {
+		return nil, err
+	}
+
+	return fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(objects...).
+		Build(), nil
+}
+
+// CreateTestClientOrFail creates a test client and fails the test if there's an error
+func CreateTestClientOrFail(t *testing.T, objects ...client.Object) client.Client {
+	client, err := CreateTestClient(objects...)
+	AssertNoError(t, err, "Error creating test client")
+	return client
 }
