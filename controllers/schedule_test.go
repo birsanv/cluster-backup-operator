@@ -1311,3 +1311,266 @@ func Test_isRestoreHubAfterSchedule(t *testing.T) {
 		})
 	}
 }
+
+// Test_isRestoreHubAfterSchedule_Enhanced provides comprehensive coverage for edge cases
+func Test_isRestoreHubAfterSchedule_Enhanced(t *testing.T) {
+	veleroNamespaceName := "backup-ns"
+	veleroNamespace := *createNamespace(veleroNamespaceName)
+	crWithVersion := createClusterVersion("version", "cluster1", nil)
+
+	// Create a schedule with a specific creation time for timestamp testing
+	baseTime := time.Now()
+	scheduleCreatedAt := metav1.NewTime(baseTime.Add(-1 * time.Hour))
+	backupCreatedAt := metav1.NewTime(baseTime.Add(-30 * time.Minute)) // 30 minutes after schedule
+
+	type args struct {
+		ctx            context.Context
+		c              client.Client
+		veleroSchedule *veleroapi.Schedule
+	}
+	tests := []struct {
+		name         string
+		args         args
+		want         bool
+		wantMessage  bool // whether we expect a message to be returned
+		setupObjects []client.Object
+	}{
+		{
+			name: "error handling - backup list in wrong namespace (no error but no backups)",
+			args: args{
+				ctx: context.Background(),
+				veleroSchedule: &veleroapi.Schedule{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:              "test-schedule",
+						Namespace:         "wrong-namespace", // Non-existent namespace
+						CreationTimestamp: scheduleCreatedAt,
+					},
+				},
+			},
+			want:         false,
+			wantMessage:  false,
+			setupObjects: []client.Object{&veleroNamespace, crWithVersion},
+		},
+		{
+			name: "multiple restore backups - most recent selected",
+			args: args{
+				ctx: context.Background(),
+				veleroSchedule: &veleroapi.Schedule{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:              "test-schedule-multi",
+						Namespace:         veleroNamespaceName,
+						CreationTimestamp: scheduleCreatedAt,
+					},
+				},
+			},
+			want:        false, // Same hub ID
+			wantMessage: false,
+			setupObjects: []client.Object{
+				&veleroNamespace,
+				crWithVersion,
+				// Older backup
+				func() client.Object {
+					backup := createBackup("acm-restore-clusters-old", veleroNamespaceName).
+						labels(map[string]string{
+							RestoreClusterLabel: "cluster2", // Different hub
+						}).object
+					backup.CreationTimestamp = metav1.NewTime(baseTime.Add(-45 * time.Minute))
+					return backup
+				}(),
+				// Newer backup (should be selected)
+				func() client.Object {
+					backup := createBackup("acm-restore-clusters-new", veleroNamespaceName).
+						labels(map[string]string{
+							RestoreClusterLabel: "cluster1", // Same hub
+						}).object
+					backup.CreationTimestamp = backupCreatedAt
+					return backup
+				}(),
+			},
+		},
+		{
+			name: "backup without RestoreClusterLabel - should be ignored",
+			args: args{
+				ctx: context.Background(),
+				veleroSchedule: &veleroapi.Schedule{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:              "test-schedule-no-label",
+						Namespace:         veleroNamespaceName,
+						CreationTimestamp: scheduleCreatedAt,
+					},
+				},
+			},
+			want:        false,
+			wantMessage: false,
+			setupObjects: []client.Object{
+				&veleroNamespace,
+				crWithVersion,
+				// Backup without RestoreClusterLabel - should not be found by HasLabels selector
+				func() client.Object {
+					backup := createBackup("acm-restore-clusters-no-label", veleroNamespaceName).
+						labels(map[string]string{
+							"other-label": "value",
+						}).object
+					backup.CreationTimestamp = backupCreatedAt
+					return backup
+				}(),
+			},
+		},
+		{
+			name: "backup with empty RestoreClusterLabel value",
+			args: args{
+				ctx: context.Background(),
+				veleroSchedule: &veleroapi.Schedule{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:              "test-schedule-empty-label",
+						Namespace:         veleroNamespaceName,
+						CreationTimestamp: scheduleCreatedAt,
+					},
+				},
+			},
+			want:        true, // Empty label is different from current hub ID, so collision detected
+			wantMessage: true,
+			setupObjects: []client.Object{
+				&veleroNamespace,
+				crWithVersion,
+				func() client.Object {
+					backup := createBackup("acm-restore-clusters-empty", veleroNamespaceName).
+						labels(map[string]string{
+							RestoreClusterLabel: "", // Empty value
+						}).object
+					backup.CreationTimestamp = backupCreatedAt
+					return backup
+				}(),
+			},
+		},
+		{
+			name: "collision detected - different hub ID with proper timestamps",
+			args: args{
+				ctx: context.Background(),
+				veleroSchedule: &veleroapi.Schedule{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:              "test-schedule-collision",
+						Namespace:         veleroNamespaceName,
+						CreationTimestamp: scheduleCreatedAt,
+					},
+				},
+			},
+			want:        true, // Should detect collision
+			wantMessage: true,
+			setupObjects: []client.Object{
+				&veleroNamespace,
+				crWithVersion,
+				func() client.Object {
+					backup := createBackup("acm-restore-clusters-collision", veleroNamespaceName).
+						labels(map[string]string{
+							RestoreClusterLabel: "cluster2", // Different hub ID
+						}).object
+					backup.CreationTimestamp = backupCreatedAt // Created after schedule
+					return backup
+				}(),
+			},
+		},
+		{
+			name: "no collision - schedule newer than backup",
+			args: args{
+				ctx: context.Background(),
+				veleroSchedule: &veleroapi.Schedule{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:              "test-schedule-newer",
+						Namespace:         veleroNamespaceName,
+						CreationTimestamp: backupCreatedAt, // Schedule created after backup
+					},
+				},
+			},
+			want:        false,
+			wantMessage: false,
+			setupObjects: []client.Object{
+				&veleroNamespace,
+				crWithVersion,
+				func() client.Object {
+					backup := createBackup("acm-restore-clusters-older", veleroNamespaceName).
+						labels(map[string]string{
+							RestoreClusterLabel: "cluster2", // Different hub ID
+						}).object
+					backup.CreationTimestamp = scheduleCreatedAt // Created before schedule
+					return backup
+				}(),
+			},
+		},
+		{
+			name: "getHubIdentification failure - no clusterversion",
+			args: args{
+				ctx: context.Background(),
+				veleroSchedule: &veleroapi.Schedule{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:              "test-schedule-no-cv",
+						Namespace:         veleroNamespaceName,
+						CreationTimestamp: scheduleCreatedAt,
+					},
+				},
+			},
+			want:        true, // Different from "unknown" hub ID
+			wantMessage: true,
+			setupObjects: []client.Object{
+				&veleroNamespace,
+				// No cluster version - getHubIdentification returns "unknown"
+				func() client.Object {
+					backup := createBackup("acm-restore-clusters-no-cv", veleroNamespaceName).
+						labels(map[string]string{
+							RestoreClusterLabel: "cluster2", // Different from "unknown"
+						}).object
+					backup.CreationTimestamp = backupCreatedAt
+					return backup
+				}(),
+			},
+		},
+		{
+			name: "exact timestamp match - schedule and backup same time",
+			args: args{
+				ctx: context.Background(),
+				veleroSchedule: &veleroapi.Schedule{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:              "test-schedule-same-time",
+						Namespace:         veleroNamespaceName,
+						CreationTimestamp: scheduleCreatedAt,
+					},
+				},
+			},
+			want:        false, // Before() returns false for equal times
+			wantMessage: false,
+			setupObjects: []client.Object{
+				&veleroNamespace,
+				crWithVersion,
+				func() client.Object {
+					backup := createBackup("acm-restore-clusters-same-time", veleroNamespaceName).
+						labels(map[string]string{
+							RestoreClusterLabel: "cluster2", // Different hub ID
+						}).object
+					backup.CreationTimestamp = scheduleCreatedAt // Exact same time
+					return backup
+				}(),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Use helper function to create test client
+			fakeClient := CreateScheduleTestClient(tt.setupObjects...)
+			tt.args.c = fakeClient
+
+			got, msg := isRestoreHubAfterSchedule(tt.args.ctx, tt.args.c, tt.args.veleroSchedule)
+
+			if got != tt.want {
+				t.Errorf("isRestoreHubAfterSchedule() = %v, want %v", got, tt.want)
+			}
+
+			// Check message expectation
+			if tt.wantMessage && msg == "" {
+				t.Errorf("isRestoreHubAfterSchedule() expected message but got empty string")
+			} else if !tt.wantMessage && msg != "" {
+				t.Errorf("isRestoreHubAfterSchedule() expected no message but got: %s", msg)
+			}
+		})
+	}
+}
