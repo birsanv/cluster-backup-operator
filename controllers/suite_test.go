@@ -710,24 +710,6 @@ var _ = BeforeSuite(func() {
 		gvrToListKindR,
 		mchObj, msaObj, msaObj2, clsvObj, res_channel_default, clsHiveObj)
 
-	//create some resources
-	/* These creates all come back with an "already exists" error - are they being faked out
-	   already by the addKnownTypes calls above?
-
-		_, err = dynR.Resource(chGVKList).Namespace("default").Create(context.Background(),
-			res_channel_default, v1.CreateOptions{})
-		Expect(err).NotTo(HaveOccurred())
-		_, err = dynR.Resource(msaGVRList).Namespace("managed1").Create(context.Background(),
-			msaObj, v1.CreateOptions{})
-		Expect(err).NotTo(HaveOccurred())
-		_, err = dynR.Resource(msaGVRList).Namespace("app").Create(context.Background(),
-			msaObj2, v1.CreateOptions{})
-		Expect(err).NotTo(HaveOccurred())
-		_, err = dynR.Resource(cpVKList).Namespace("managed1").Create(context.Background(),
-			clsHiveObj, v1.CreateOptions{})
-		Expect(err).NotTo(HaveOccurred())
-	*/
-
 	err = (&RestoreReconciler{
 		KubeClient:      nil,
 		Client:          mgr.GetClient(),
