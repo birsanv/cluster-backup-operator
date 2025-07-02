@@ -1280,75 +1280,6 @@ func CreateScheduleTestClientWithScheme(setupScheme bool, objects ...client.Obje
 		Build()
 }
 
-// ScheduleTestCase represents a common test case structure for schedule tests
-type ScheduleTestCase struct {
-	Name         string
-	SetupObjects []client.Object
-	SetupScheme  bool
-	WantError    bool
-	WantResult   interface{}
-}
-
-// RunScheduleTestCase is a helper to run a common schedule test pattern
-func RunScheduleTestCase(t *testing.T, tc ScheduleTestCase, testFunc func(client.Client) (interface{}, error)) {
-	t.Run(tc.Name, func(t *testing.T) {
-		fakeClient := CreateScheduleTestClientWithScheme(tc.SetupScheme, tc.SetupObjects...)
-
-		result, err := testFunc(fakeClient)
-
-		if tc.WantError && err == nil {
-			t.Errorf("Expected error but got none")
-		}
-		if !tc.WantError && err != nil {
-			t.Errorf("Unexpected error: %v", err)
-		}
-		if tc.WantResult != nil && result != tc.WantResult {
-			t.Errorf("Expected result %v, got %v", tc.WantResult, result)
-		}
-	})
-}
-
-// VeleroTestObjects creates common velero test objects
-type VeleroTestObjects struct {
-	Namespace      *corev1.Namespace
-	ClusterVersion *ocinfrav1.ClusterVersion
-	Schedule       *veleroapi.Schedule
-	Backup         *veleroapi.Backup
-	BackupSchedule *v1beta1.BackupSchedule
-}
-
-// CreateVeleroTestObjects creates a set of common velero objects for testing
-func CreateVeleroTestObjects(namespaceName, scheduleName, backupName string) *VeleroTestObjects {
-	return &VeleroTestObjects{
-		Namespace:      createNamespace(namespaceName),
-		ClusterVersion: createClusterVersion("version", "cluster1", nil),
-		Schedule:       createSchedule(scheduleName, namespaceName).object,
-		Backup:         createBackup(backupName, namespaceName).object,
-		BackupSchedule: createBackupSchedule("test-schedule", namespaceName).object,
-	}
-}
-
-// AsObjects converts VeleroTestObjects to a slice of client.Object
-func (vto *VeleroTestObjects) AsObjects() []client.Object {
-	objects := []client.Object{}
-	if vto.Namespace != nil {
-		objects = append(objects, vto.Namespace)
-	}
-	if vto.ClusterVersion != nil {
-		objects = append(objects, vto.ClusterVersion)
-	}
-	if vto.Schedule != nil {
-		objects = append(objects, vto.Schedule)
-	}
-	if vto.Backup != nil {
-		objects = append(objects, vto.Backup)
-	}
-	if vto.BackupSchedule != nil {
-		objects = append(objects, vto.BackupSchedule)
-	}
-	return objects
-}
-
 // CreateDeleteVeleroSchedulesTestClient creates a client for deleteVeleroSchedules tests with conditional setup
 func CreateDeleteVeleroSchedulesTestClient(
 	testName string,
@@ -1381,15 +1312,6 @@ func CreateTestBackupWithLabels(name, namespace, clusterLabel, restoreLabel stri
 			RestoreClusterLabel:        restoreLabel,
 		}).
 		phase(veleroapi.BackupPhaseCompleted).
-		object
-}
-
-// CreateTestScheduleWithLabels creates a schedule with common test labels
-func CreateTestScheduleWithLabels(name, namespace, backupScheduleName string) *veleroapi.Schedule {
-	return createSchedule(name, namespace).
-		scheduleLabels(map[string]string{
-			BackupScheduleNameLabel: backupScheduleName,
-		}).
 		object
 }
 
@@ -1440,35 +1362,4 @@ func CreateVeleroCRDTestClient(includeVeleroScheme bool, objects ...client.Objec
 // CreateBackupSchedulePausedTestClient creates a fake client for backup schedule paused tests
 func CreateBackupSchedulePausedTestClient(objects ...client.Object) client.Client {
 	return CreateUtilsTestClient(true, false, true, objects...)
-}
-
-// UtilsTestCase represents a common test case structure for utils tests
-type UtilsTestCase struct {
-	Name         string
-	SetupScheme  bool
-	SetupObjects []client.Object
-	WantError    bool
-	WantResult   interface{}
-}
-
-// RunUtilsTestCase runs a utils test case with the provided test function
-func RunUtilsTestCase(t *testing.T, tc UtilsTestCase, includeVelero, includeOCInfra, includeV1Beta1 bool,
-	testFunc func(client.Client) (interface{}, error)) {
-
-	fakeClient := CreateUtilsTestClient(includeVelero && tc.SetupScheme,
-		includeOCInfra && tc.SetupScheme,
-		includeV1Beta1 && tc.SetupScheme,
-		tc.SetupObjects...)
-
-	result, err := testFunc(fakeClient)
-
-	if tc.WantError && err == nil {
-		t.Errorf("%s: expected error but got none", tc.Name)
-	}
-	if !tc.WantError && err != nil {
-		t.Errorf("%s: unexpected error: %v", tc.Name, err)
-	}
-	if tc.WantResult != nil && result != tc.WantResult {
-		t.Errorf("%s: expected result %v, got %v", tc.Name, tc.WantResult, result)
-	}
 }
