@@ -416,6 +416,9 @@ func isCRDPresent(ctx context.Context, k8sClient client.Client, objList client.O
 }
 
 func isCRDNotPresentError(err error) bool {
+	if err == nil {
+		return false
+	}
 	if apimeta.IsNoMatchError(err) || kerrors.IsNotFound(err) ||
 		strings.Contains(err.Error(), "failed to get API group resources") ||
 		strings.Contains(err.Error(), "no kind is registered for the type") {

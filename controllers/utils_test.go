@@ -27,10 +27,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pkg/errors"
 	v1beta1 "github.com/stolostron/cluster-backup-operator/api/v1beta1"
 	veleroapi "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	corev1 "k8s.io/api/core/v1"
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	clusterv1 "open-cluster-management.io/api/cluster/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -642,6 +646,138 @@ func Test_VeleroCRDsPresent(t *testing.T) {
 			t.Errorf("VeleroCRDsPresent() should return true when CRDs are present")
 		}
 	})
+}
+
+func Test_isCRDNotPresentError(t *testing.T) {
+	type args struct {
+		err error
+	}
+	tests := []struct {
+		name string
+		args args
+		want bool
+	}{
+		{
+			name: "nil error should return false",
+			args: args{
+				err: nil,
+			},
+			want: false,
+		},
+		{
+			name: "generic error should return false",
+			args: args{
+				err: errors.New("some generic error"),
+			},
+			want: false,
+		},
+		{
+			name: "NoMatchError should return true",
+			args: args{
+				err: &meta.NoResourceMatchError{
+					PartialResource: schema.GroupVersionResource{
+						Group: "test", Version: "v1", Resource: "tests",
+					},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "NotFound error should return true",
+			args: args{
+				err: kerrors.NewNotFound(schema.GroupResource{Group: "test", Resource: "tests"}, "test-resource"),
+			},
+			want: true,
+		},
+		{
+			name: "error containing 'failed to get API group resources' should return true",
+			args: args{
+				err: errors.New("failed to get API group resources for group test"),
+			},
+			want: true,
+		},
+		{
+			name: "error containing 'no kind is registered for the type' should return true",
+			args: args{
+				err: errors.New("no kind is registered for the type v1beta1.TestResource"),
+			},
+			want: true,
+		},
+		{
+			name: "error with 'failed to get API group resources' substring should return true",
+			args: args{
+				err: errors.New("some prefix: failed to get API group resources and some suffix"),
+			},
+			want: true,
+		},
+		{
+			name: "error with 'no kind is registered for the type' substring should return true",
+			args: args{
+				err: errors.New("prefix: no kind is registered for the type SomeType: suffix"),
+			},
+			want: true,
+		},
+		{
+			name: "case sensitivity - 'Failed to get API group resources' should return false",
+			args: args{
+				err: errors.New("Failed to get API group resources"),
+			},
+			want: false,
+		},
+		{
+			name: "case sensitivity - 'No kind is registered for the type' should return false",
+			args: args{
+				err: errors.New("No kind is registered for the type TestType"),
+			},
+			want: false,
+		},
+		{
+			name: "partial match - 'failed to get API' should return false",
+			args: args{
+				err: errors.New("failed to get API"),
+			},
+			want: false,
+		},
+		{
+			name: "partial match - 'no kind is registered' should return false",
+			args: args{
+				err: errors.New("no kind is registered"),
+			},
+			want: false,
+		},
+		{
+			name: "timeout error should return false",
+			args: args{
+				err: errors.New("timeout waiting for response"),
+			},
+			want: false,
+		},
+		{
+			name: "permission denied error should return false",
+			args: args{
+				err: kerrors.NewForbidden(
+					schema.GroupResource{Group: "test", Resource: "tests"},
+					"test-resource",
+					errors.New("forbidden"),
+				),
+			},
+			want: false,
+		},
+		{
+			name: "already exists error should return false",
+			args: args{
+				err: kerrors.NewAlreadyExists(schema.GroupResource{Group: "test", Resource: "tests"}, "test-resource"),
+			},
+			want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isCRDNotPresentError(tt.args.err); got != tt.want {
+				t.Errorf("isCRDNotPresentError() = %v, want %v", got, tt.want)
+			}
+		})
+	}
 }
 
 func labelSelectorArrayEqual(a []*metav1.LabelSelector, b []metav1.LabelSelector) bool {

@@ -1180,145 +1180,7 @@ func Test_isRestoreHubAfterSchedule(t *testing.T) {
 	veleroNamespace := *createNamespace(veleroNamespaceName)
 	crWithVersion := createClusterVersion("version", "cluster1", nil)
 
-	type args struct {
-		ctx                         context.Context
-		c                           client.Client
-		veleroSchedule              *veleroapi.Schedule
-		acmClusterActivationBackups []*veleroapi.Backup
-		createScheduleFirst         bool
-		sleepTime                   int
-	}
-	tests := []struct {
-		name         string
-		args         args
-		want         bool
-		setupObjects []client.Object
-	}{
-		{
-			name: "no collision, list backup fails",
-			args: args{
-				ctx: context.Background(),
-				veleroSchedule: createSchedule("acm-backup-schedule-1", veleroNamespaceName).
-					object,
-				acmClusterActivationBackups: []*veleroapi.Backup{},
-				createScheduleFirst:         true,
-				sleepTime:                   2,
-			},
-			want:         false,
-			setupObjects: []client.Object{&veleroNamespace, crWithVersion},
-		},
-		{
-			name: "no collision, no backup restore found",
-			args: args{
-				ctx: context.Background(),
-				veleroSchedule: createSchedule("acm-backup-schedule-2", veleroNamespaceName).
-					object,
-				acmClusterActivationBackups: []*veleroapi.Backup{},
-				createScheduleFirst:         true,
-				sleepTime:                   2,
-			},
-			want:         false,
-			setupObjects: []client.Object{&veleroNamespace, crWithVersion},
-		},
-		{
-			name: "collision, backup schedule created first, before restore",
-			args: args{
-				ctx: context.Background(),
-				veleroSchedule: createSchedule("acm-backup-schedule-3", veleroNamespaceName).
-					object,
-				acmClusterActivationBackups: []*veleroapi.Backup{createBackup("acm-restore-clusters-2", veleroNamespaceName).
-					labels(map[string]string{
-						BackupScheduleClusterLabel: "cluster1",
-						RestoreClusterLabel:        "cluster2",
-					}).
-					phase(veleroapi.BackupPhaseCompleted).
-					object},
-				createScheduleFirst: true,
-				sleepTime:           2,
-			},
-			want: false, // Fake client doesn't support creation timestamp differences
-			setupObjects: []client.Object{
-				&veleroNamespace,
-				crWithVersion,
-				createSchedule("acm-backup-schedule-3", veleroNamespaceName).object,
-				CreateTestBackupWithLabels("acm-restore-clusters-2", veleroNamespaceName, "cluster1", "cluster2"),
-			},
-		},
-		{
-			name: "no collision, backup schedule created first, before restore,  but on the same hub",
-			args: args{
-				ctx: context.Background(),
-				veleroSchedule: createSchedule("acm-backup-schedule-4", veleroNamespaceName).
-					object,
-				acmClusterActivationBackups: []*veleroapi.Backup{createBackup("acm-restore-clusters-1", veleroNamespaceName).
-					labels(map[string]string{
-						BackupScheduleClusterLabel: "cluster1",
-						RestoreClusterLabel:        "cluster1",
-					}).
-					phase(veleroapi.BackupPhaseCompleted).
-					object},
-				createScheduleFirst: true,
-				sleepTime:           2,
-			},
-			want: false,
-			setupObjects: []client.Object{
-				&veleroNamespace,
-				crWithVersion,
-				CreateTestBackupWithLabels("acm-restore-clusters-1", veleroNamespaceName, "cluster1", "cluster1"),
-			},
-		},
-		{
-			name: "no collision, backup schedule created after restore",
-			args: args{
-				ctx: context.Background(),
-				veleroSchedule: createSchedule("acm-backup-schedule-5", veleroNamespaceName).
-					object,
-				acmClusterActivationBackups: []*veleroapi.Backup{createBackup("acm-restore-clusters-3", veleroNamespaceName).
-					labels(map[string]string{
-						BackupScheduleClusterLabel: "cluster1",
-						RestoreClusterLabel:        "cluster2",
-					}).
-					phase(veleroapi.BackupPhaseCompleted).
-					object},
-				createScheduleFirst: false,
-				sleepTime:           2,
-			},
-			want: false,
-			setupObjects: []client.Object{
-				&veleroNamespace,
-				crWithVersion,
-				createBackup("acm-restore-clusters-3", veleroNamespaceName).
-					labels(map[string]string{
-						BackupScheduleClusterLabel: "cluster1",
-						RestoreClusterLabel:        "cluster2",
-					}).
-					phase(veleroapi.BackupPhaseCompleted).
-					object,
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Use helper function to create test client
-			fakeClient := CreateScheduleTestClient(tt.setupObjects...)
-			tt.args.c = fakeClient
-
-			if got, _ := isRestoreHubAfterSchedule(tt.args.ctx, tt.args.c,
-				tt.args.veleroSchedule); got != tt.want {
-				t.Errorf("isRestoreHubAfterSchedule() = %v, want %v ", got, tt.want)
-			}
-		})
-	}
-}
-
-// Test_isRestoreHubAfterSchedule_Enhanced provides comprehensive coverage for edge cases
-func Test_isRestoreHubAfterSchedule_Enhanced(t *testing.T) {
-	veleroNamespaceName := "backup-ns"
-	veleroNamespace := *createNamespace(veleroNamespaceName)
-	crWithVersion := createClusterVersion("version", "cluster1", nil)
-
-	// Create a schedule with a specific creation time for timestamp testing
+	// Create timestamp variables for enhanced test cases
 	baseTime := time.Now()
 	scheduleCreatedAt := metav1.NewTime(baseTime.Add(-1 * time.Hour))
 	backupCreatedAt := metav1.NewTime(baseTime.Add(-30 * time.Minute)) // 30 minutes after schedule
@@ -1335,6 +1197,80 @@ func Test_isRestoreHubAfterSchedule_Enhanced(t *testing.T) {
 		wantMessage  bool // whether we expect a message to be returned
 		setupObjects []client.Object
 	}{
+		{
+			name: "no collision, list backup fails",
+			args: args{
+				ctx: context.Background(),
+				veleroSchedule: createSchedule("acm-backup-schedule-1", veleroNamespaceName).
+					object,
+			},
+			want:         false,
+			wantMessage:  false,
+			setupObjects: []client.Object{&veleroNamespace, crWithVersion},
+		},
+		{
+			name: "no collision, no backup restore found",
+			args: args{
+				ctx: context.Background(),
+				veleroSchedule: createSchedule("acm-backup-schedule-2", veleroNamespaceName).
+					object,
+			},
+			want:         false,
+			wantMessage:  false,
+			setupObjects: []client.Object{&veleroNamespace, crWithVersion},
+		},
+		{
+			name: "collision, backup schedule created first, before restore",
+			args: args{
+				ctx: context.Background(),
+				veleroSchedule: createSchedule("acm-backup-schedule-3", veleroNamespaceName).
+					object,
+			},
+			want:        false, // Fake client doesn't support creation timestamp differences
+			wantMessage: false,
+			setupObjects: []client.Object{
+				&veleroNamespace,
+				crWithVersion,
+				createSchedule("acm-backup-schedule-3", veleroNamespaceName).object,
+				CreateTestBackupWithLabels("acm-restore-clusters-2", veleroNamespaceName, "cluster1", "cluster2"),
+			},
+		},
+		{
+			name: "no collision, backup schedule created first, before restore, but on the same hub",
+			args: args{
+				ctx: context.Background(),
+				veleroSchedule: createSchedule("acm-backup-schedule-4", veleroNamespaceName).
+					object,
+			},
+			want:        false,
+			wantMessage: false,
+			setupObjects: []client.Object{
+				&veleroNamespace,
+				crWithVersion,
+				CreateTestBackupWithLabels("acm-restore-clusters-1", veleroNamespaceName, "cluster1", "cluster1"),
+			},
+		},
+		{
+			name: "no collision, backup schedule created after restore",
+			args: args{
+				ctx: context.Background(),
+				veleroSchedule: createSchedule("acm-backup-schedule-5", veleroNamespaceName).
+					object,
+			},
+			want:        false,
+			wantMessage: false,
+			setupObjects: []client.Object{
+				&veleroNamespace,
+				crWithVersion,
+				createBackup("acm-restore-clusters-3", veleroNamespaceName).
+					labels(map[string]string{
+						BackupScheduleClusterLabel: "cluster1",
+						RestoreClusterLabel:        "cluster2",
+					}).
+					phase(veleroapi.BackupPhaseCompleted).
+					object,
+			},
+		},
 		{
 			name: "error handling - backup list in wrong namespace (no error but no backups)",
 			args: args{
