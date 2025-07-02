@@ -1336,61 +1336,37 @@ func Test_updateSecretsLabels(t *testing.T) {
 
 	labelName := backupCredsClusterLabel
 	labelValue := "clusterpool"
-	clsName := "managed1"
 
-	// Create test namespace
-	namespace := createTestNamespace(clsName)
-
-	// Create test secrets
-	importSecret := createTestSecret(clsName+"-import", clsName, nil, nil)
-
-	importSecret1 := createTestSecret(clsName+"-import-1", clsName, nil, nil)
-
-	importSecret2 := createTestSecret(clsName+"-import-2", clsName, nil, nil)
-
-	bootstrapSecret := createTestSecret(clsName+"-bootstrap-test", clsName, nil, nil)
-
-	otherSecret := createTestSecret(clsName+"-some-other-secret-test", clsName, nil, nil)
-
-	scheme := createBasicScheme()
-
-	k8sClient := createFakeClient(scheme, namespace, importSecret, importSecret1,
-		importSecret2, bootstrapSecret, otherSecret)
-
-	hiveSecrets := corev1.SecretList{
-		Items: []corev1.Secret{
-			*importSecret,
-			*importSecret1,
-			*importSecret2,
-			*bootstrapSecret,
-			*otherSecret,
-		},
-	}
-
-	type args struct {
-		ctx     context.Context
-		c       client.Client
-		secrets corev1.SecretList
-		prefix  string
-		lName   string
-		lValue  string
-	}
 	tests := []struct {
 		name                    string
-		args                    args
+		setupSecrets            func() ([]corev1.Secret, string, client.Client) // Returns secrets, namespace, client
+		prefix                  string
 		expectedBackupSecrets   []string // Secrets that should have backup label
 		expectedNoBackupSecrets []string // Secrets that should NOT have backup label
 	}{
 		{
 			name: "should process hive secrets correctly",
-			args: args{
-				ctx:     ctx,
-				c:       k8sClient,
-				secrets: hiveSecrets,
-				lName:   labelName,
-				lValue:  labelValue,
-				prefix:  clsName,
+			setupSecrets: func() ([]corev1.Secret, string, client.Client) {
+				clsName := "managed1"
+				namespace := createTestNamespace(clsName)
+
+				importSecret := createTestSecret(clsName+"-import", clsName, nil, nil)
+				importSecret1 := createTestSecret(clsName+"-import-1", clsName, nil, nil)
+				importSecret2 := createTestSecret(clsName+"-import-2", clsName, nil, nil)
+				bootstrapSecret := createTestSecret(clsName+"-bootstrap-test", clsName, nil, nil)
+				otherSecret := createTestSecret(clsName+"-some-other-secret-test", clsName, nil, nil)
+
+				scheme := createBasicScheme()
+				k8sClient := createFakeClient(scheme, namespace, importSecret, importSecret1,
+					importSecret2, bootstrapSecret, otherSecret)
+
+				secrets := []corev1.Secret{
+					*importSecret, *importSecret1, *importSecret2, *bootstrapSecret, *otherSecret,
+				}
+
+				return secrets, clsName, k8sClient
 			},
+			prefix: "managed1",
 			expectedBackupSecrets: []string{
 				"managed1-import-1",               // Already had label, should keep it
 				"managed1-import-2",               // Should get label added
@@ -1401,24 +1377,192 @@ func Test_updateSecretsLabels(t *testing.T) {
 				"managed1-bootstrap-test", // Bootstrap secret should not get label
 			},
 		},
+		{
+			name: "empty secret list",
+			setupSecrets: func() ([]corev1.Secret, string, client.Client) {
+				clsName := "test-cluster"
+				namespace := createTestNamespace(clsName)
+				scheme := createBasicScheme()
+				k8sClient := createFakeClient(scheme, namespace)
+				return []corev1.Secret{}, clsName, k8sClient
+			},
+			prefix:                  "test-cluster",
+			expectedBackupSecrets:   []string{},
+			expectedNoBackupSecrets: []string{},
+		},
+		{
+			name: "secrets with existing backup labels should be skipped",
+			setupSecrets: func() ([]corev1.Secret, string, client.Client) {
+				clsName := "test-cluster"
+				namespace := createTestNamespace(clsName)
+
+				adminPass := createTestSecret("test-cluster-admin-pass", clsName,
+					map[string]string{backupCredsHiveLabel: "hive-value"}, nil)
+				userCreds := createTestSecret("test-cluster-user-creds", clsName,
+					map[string]string{backupCredsUserLabel: "user-value"}, nil)
+				clusterCreds := createTestSecret("test-cluster-cluster-creds", clsName,
+					map[string]string{backupCredsClusterLabel: "existing-cluster-value"}, nil)
+				newSecret := createTestSecret("test-cluster-new-secret", clsName, nil, nil)
+
+				scheme := createBasicScheme()
+				k8sClient := createFakeClient(scheme, namespace, adminPass, userCreds, clusterCreds, newSecret)
+
+				secrets := []corev1.Secret{*adminPass, *userCreds, *clusterCreds, *newSecret}
+				return secrets, clsName, k8sClient
+			},
+			prefix: "test-cluster",
+			expectedBackupSecrets: []string{
+				"test-cluster-new-secret", // Only this one should get the new label
+			},
+			expectedNoBackupSecrets: []string{
+				"test-cluster-admin-pass",    // Has hive label
+				"test-cluster-user-creds",    // Has user label
+				"test-cluster-cluster-creds", // Has cluster label
+			},
+		},
+		{
+			name: "import secrets should have backup labels removed",
+			setupSecrets: func() ([]corev1.Secret, string, client.Client) {
+				clsName := "test-cluster"
+				namespace := createTestNamespace(clsName)
+
+				importSecret := createTestSecret("test-cluster-import", clsName,
+					map[string]string{backupCredsClusterLabel: labelValue}, nil)
+				otherImport := createTestSecret("other-cluster-import", clsName,
+					map[string]string{backupCredsHiveLabel: "hive-value"}, nil)
+				importHelper := createTestSecret("test-cluster-import-helper", clsName,
+					map[string]string{backupCredsUserLabel: "user-value"}, nil)
+
+				scheme := createBasicScheme()
+				k8sClient := createFakeClient(scheme, namespace, importSecret, otherImport, importHelper)
+
+				secrets := []corev1.Secret{*importSecret, *otherImport, *importHelper}
+				return secrets, clsName, k8sClient
+			},
+			prefix:                "test-cluster",
+			expectedBackupSecrets: []string{},
+			expectedNoBackupSecrets: []string{
+				"test-cluster-import",        // Should have label removed
+				"other-cluster-import",       // Should keep hive label (not matching prefix)
+				"test-cluster-import-helper", // Should have label removed
+			},
+		},
+		{
+			name: "bootstrap secrets should not get backup labels",
+			setupSecrets: func() ([]corev1.Secret, string, client.Client) {
+				clsName := "test-cluster"
+				namespace := createTestNamespace(clsName)
+
+				bootstrapSecret := createTestSecret("test-cluster-bootstrap-secret", clsName, nil, nil)
+				bootstrapKey := createTestSecret("test-cluster-admin-bootstrap-key", clsName, nil, nil)
+				bootstrapToken := createTestSecret("test-cluster-some-bootstrap-token", clsName, nil, nil)
+				regularSecret := createTestSecret("test-cluster-regular-secret", clsName, nil, nil)
+
+				scheme := createBasicScheme()
+				k8sClient := createFakeClient(scheme, namespace, bootstrapSecret, bootstrapKey, bootstrapToken, regularSecret)
+
+				secrets := []corev1.Secret{*bootstrapSecret, *bootstrapKey, *bootstrapToken, *regularSecret}
+				return secrets, clsName, k8sClient
+			},
+			prefix: "test-cluster",
+			expectedBackupSecrets: []string{
+				"test-cluster-regular-secret", // Only non-bootstrap secret should get label
+			},
+			expectedNoBackupSecrets: []string{
+				"test-cluster-bootstrap-secret", // Bootstrap secrets should not get labels
+				"test-cluster-admin-bootstrap-key",
+				"test-cluster-some-bootstrap-token",
+			},
+		},
+		{
+			name: "prefix mismatch - secrets should be skipped",
+			setupSecrets: func() ([]corev1.Secret, string, client.Client) {
+				clsName := "test-cluster"
+				namespace := createTestNamespace(clsName)
+
+				otherSecret := createTestSecret("other-cluster-secret", clsName, nil, nil)
+				differentSecret := createTestSecret("different-prefix-creds", clsName, nil, nil)
+				matchingSecret := createTestSecret("test-cluster-matching-secret", clsName, nil, nil)
+
+				scheme := createBasicScheme()
+				k8sClient := createFakeClient(scheme, namespace, otherSecret, differentSecret, matchingSecret)
+
+				secrets := []corev1.Secret{*otherSecret, *differentSecret, *matchingSecret}
+				return secrets, clsName, k8sClient
+			},
+			prefix: "test-cluster",
+			expectedBackupSecrets: []string{
+				"test-cluster-matching-secret", // Only matching prefix should get label
+			},
+			expectedNoBackupSecrets: []string{
+				"other-cluster-secret",   // Different prefix
+				"different-prefix-creds", // Different prefix
+			},
+		},
+		{
+			name: "mixed scenarios - comprehensive test",
+			setupSecrets: func() ([]corev1.Secret, string, client.Client) {
+				clsName := "test-cluster"
+				namespace := createTestNamespace(clsName)
+
+				// Import secrets with existing labels (should be removed)
+				importSecret := createTestSecret("test-cluster-import", clsName,
+					map[string]string{backupCredsClusterLabel: labelValue}, nil)
+
+				// Bootstrap secrets (should not get labels)
+				bootstrapKey := createTestSecret("test-cluster-bootstrap-key", clsName, nil, nil)
+
+				// Secrets with existing different backup labels (should be skipped)
+				existingHive := createTestSecret("test-cluster-existing-hive", clsName,
+					map[string]string{backupCredsHiveLabel: "hive"}, nil)
+				existingUser := createTestSecret("test-cluster-existing-user", clsName,
+					map[string]string{backupCredsUserLabel: "user"}, nil)
+
+				// Regular secrets matching prefix (should get labels)
+				adminPassword := createTestSecret("test-cluster-admin-password", clsName, nil, nil)
+				serviceAccount := createTestSecret("test-cluster-service-account", clsName, nil, nil)
+
+				// Secrets not matching prefix (should be ignored)
+				otherSecret := createTestSecret("other-cluster-secret", clsName, nil, nil)
+
+				scheme := createBasicScheme()
+				k8sClient := createFakeClient(scheme, namespace, importSecret, bootstrapKey,
+					existingHive, existingUser, adminPassword, serviceAccount, otherSecret)
+
+				secrets := []corev1.Secret{*importSecret, *bootstrapKey, *existingHive,
+					*existingUser, *adminPassword, *serviceAccount, *otherSecret}
+				return secrets, clsName, k8sClient
+			},
+			prefix: "test-cluster",
+			expectedBackupSecrets: []string{
+				"test-cluster-admin-password",  // Should get new label
+				"test-cluster-service-account", // Should get new label
+			},
+			expectedNoBackupSecrets: []string{
+				"test-cluster-import",        // Import secret should have label removed
+				"test-cluster-bootstrap-key", // Bootstrap secret should not get label
+				"test-cluster-existing-hive", // Has existing hive label
+				"test-cluster-existing-user", // Has existing user label
+				"other-cluster-secret",       // Prefix doesn't match
+			},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// Setup test data
+			secrets, namespace, k8sClient := tt.setupSecrets()
+			secretList := corev1.SecretList{Items: secrets}
+
 			// Call the function under test
-			updateSecretsLabels(tt.args.ctx, tt.args.c,
-				tt.args.secrets,
-				tt.args.prefix,
-				tt.args.lName,
-				tt.args.lValue,
-			)
+			updateSecretsLabels(ctx, k8sClient, secretList, tt.prefix, labelName, labelValue)
 
 			// Verify secrets that should have backup labels
 			for _, secretName := range tt.expectedBackupSecrets {
 				secret := &corev1.Secret{}
 				err := k8sClient.Get(ctx, types.NamespacedName{
 					Name:      secretName,
-					Namespace: clsName,
+					Namespace: namespace,
 				}, secret)
 				if err != nil {
 					t.Errorf("Failed to get secret %s: %v", secretName, err)
@@ -1436,7 +1580,7 @@ func Test_updateSecretsLabels(t *testing.T) {
 				secret := &corev1.Secret{}
 				err := k8sClient.Get(ctx, types.NamespacedName{
 					Name:      secretName,
-					Namespace: clsName,
+					Namespace: namespace,
 				}, secret)
 				if err != nil {
 					t.Errorf("Failed to get secret %s: %v", secretName, err)
