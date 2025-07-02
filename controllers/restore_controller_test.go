@@ -1270,6 +1270,16 @@ var _ = Describe("Basic Restore controller", func() {
 				}
 			})
 
+			// Clean up all storage locations for this test to ensure isolation
+			JustBeforeEach(func() {
+				// Delete all existing BackupStorageLocation resources to ensure clean state
+				storageLocations := &veleroapi.BackupStorageLocationList{}
+				Expect(k8sClient.List(ctx, storageLocations)).To(Succeed())
+				for _, location := range storageLocations.Items {
+					Expect(k8sClient.Delete(ctx, &location)).To(Succeed())
+				}
+			})
+
 			It("should fail when backup storage location is unavailable", func() {
 				createdRestore := v1beta1.Restore{}
 				By("created restore should not contain velero restores in status")

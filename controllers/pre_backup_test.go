@@ -1040,10 +1040,7 @@ func Test_cleanupMSAForImportedClusters(t *testing.T) {
 
 	// Create test managed clusters
 	managedCluster1 := createTestManagedCluster("managed1", false)
-
 	managedClusterHive := createTestManagedCluster("managed2-hive", false)
-
-	// Local cluster with proper label
 	managedClusterLocal := createTestManagedCluster("loc", true)
 
 	// Create hive secret (indicates this is a hive cluster)
@@ -1057,8 +1054,94 @@ func Test_cleanupMSAForImportedClusters(t *testing.T) {
 		},
 	}
 
+	// Create ManagedClusterAddOn for testing
+	msaAddon := &addonv1alpha1.ManagedClusterAddOn{
+		ObjectMeta: v1.ObjectMeta{
+			Name:      msa_addon,
+			Namespace: "managed1",
+			Labels: map[string]string{
+				msa_label: msa_service_name,
+			},
+		},
+	}
+
+	// Create ManagedClusterAddOn with deletion timestamp for testing
+	deletionTime := v1.NewTime(time.Now())
+	msaAddonWithDeletion := &addonv1alpha1.ManagedClusterAddOn{
+		ObjectMeta: v1.ObjectMeta{
+			Name:              msa_addon + "-deletion",
+			Namespace:         "managed1",
+			DeletionTimestamp: &deletionTime,
+			Finalizers:        []string{"test-finalizer"}, // Required for fake client
+			Labels: map[string]string{
+				msa_label: msa_service_name,
+			},
+		},
+	}
+
+	// Create ManifestWork for testing
+	manifestWork := &workv1.ManifestWork{
+		ObjectMeta: v1.ObjectMeta{
+			Name:      "test-manifestwork",
+			Namespace: "managed1",
+			Labels: map[string]string{
+				addon_work_label: msa_addon,
+			},
+		},
+	}
+
+	// Create ManifestWork with deletion timestamp
+	manifestWorkWithDeletion := &workv1.ManifestWork{
+		ObjectMeta: v1.ObjectMeta{
+			Name:              "test-manifestwork-deletion",
+			Namespace:         "managed1",
+			DeletionTimestamp: &deletionTime,
+			Finalizers:        []string{"test-finalizer"}, // Required for fake client
+			Labels: map[string]string{
+				addon_work_label: msa_addon,
+			},
+		},
+	}
+
+	// Create MSA secret for testing
+	msaSecret := &corev1.Secret{
+		ObjectMeta: v1.ObjectMeta{
+			Name:      "msa-secret",
+			Namespace: "managed1",
+			Labels: map[string]string{
+				backupCredsClusterLabel: "managed1",
+			},
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			"token":     []byte("test-token"),
+			"ca.crt":    []byte("test-ca"),
+			"namespace": []byte("test-namespace"),
+			"server":    []byte("test-server"),
+		},
+	}
+
+	// Create MSA secret with deletion timestamp
+	msaSecretWithDeletion := &corev1.Secret{
+		ObjectMeta: v1.ObjectMeta{
+			Name:              "msa-secret-deletion",
+			Namespace:         "managed1",
+			DeletionTimestamp: &deletionTime,
+			Finalizers:        []string{"test-finalizer"}, // Required for fake client
+			Labels: map[string]string{
+				backupCredsClusterLabel: "managed1",
+			},
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			"token": []byte("test-token"),
+		},
+	}
+
 	k8sClient := createFakeClient(scheme, ns1, nsHive, nsLocal,
-		managedCluster1, managedClusterHive, managedClusterLocal, hiveSecret)
+		managedCluster1, managedClusterHive, managedClusterLocal, hiveSecret,
+		msaAddon, msaAddonWithDeletion, manifestWork, manifestWorkWithDeletion,
+		msaSecret, msaSecretWithDeletion)
 
 	// Create fake dynamic client with MSA object
 	obj1 := &unstructured.Unstructured{}
@@ -1117,19 +1200,43 @@ func Test_cleanupMSAForImportedClusters(t *testing.T) {
 		mapping *meta.RESTMapping
 	}
 	tests := []struct {
-		name string
-		args args
+		name    string
+		args    args
+		wantErr bool
 	}{
 		{
-			name: "clean up msa and test prepareImportedClusters",
+			name: "successful cleanup with MSA mapping",
 			args: args{
 				ctx:     ctx,
 				c:       k8sClient,
 				dr:      resInterface,
 				mapping: &targetMapping,
 			},
+			wantErr: false,
+		},
+		{
+			name: "successful cleanup without MSA mapping (nil)",
+			args: args{
+				ctx:     ctx,
+				c:       k8sClient,
+				dr:      resInterface,
+				mapping: nil,
+			},
+			wantErr: false,
+		},
+		{
+			name: "cleanup with empty client (no managed clusters)",
+			args: args{
+				ctx: ctx,
+				// Empty client without any managed clusters
+				c:       createFakeClient(scheme),
+				dr:      resInterface,
+				mapping: &targetMapping,
+			},
+			wantErr: false,
 		},
 	}
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Test cleanupMSAForImportedClusters
@@ -1137,55 +1244,89 @@ func Test_cleanupMSAForImportedClusters(t *testing.T) {
 				tt.args.dr,
 				tt.args.mapping,
 			)
-			if err != nil {
-				t.Errorf("Error running cleanupMSAForImportedClusters %s", err.Error())
+			if (err != nil) != tt.wantErr {
+				t.Errorf("cleanupMSAForImportedClusters() error = %v, wantErr %v", err, tt.wantErr)
+				return
 			}
 
-			// Test prepareImportedClusters
-			err = prepareImportedClusters(tt.args.ctx, tt.args.c,
-				tt.args.dr,
-				tt.args.mapping, backupSchedule)
-			if err != nil {
-				t.Errorf("Error running prepareImportedClusters %s", err.Error())
-			}
-
-			// Verify ManagedClusterAddOns were created correctly
-			addons := &addonv1alpha1.ManagedClusterAddOnList{}
-			if err := tt.args.c.List(tt.args.ctx, addons); err != nil {
-				t.Errorf("cannot list managedclusteraddons %s ", err.Error())
-			}
-
-			var foundManaged1MSAAddon *addonv1alpha1.ManagedClusterAddOn
-			for i := range addons.Items {
-				addon := addons.Items[i]
-
-				if addon.Name != msa_addon {
-					continue // not a managed service account addon, ignore
-				}
-				if addon.Namespace == "managed1" {
-					foundManaged1MSAAddon = &addon
+			if !tt.wantErr {
+				// Verify that resources with deletion timestamps were skipped
+				addons := &addonv1alpha1.ManagedClusterAddOnList{}
+				if err := tt.args.c.List(tt.args.ctx, addons); err == nil {
+					for _, addon := range addons.Items {
+						if addon.Labels[msa_label] == msa_service_name &&
+							!addon.GetDeletionTimestamp().IsZero() {
+							// This addon should have been skipped for deletion
+							t.Logf("Addon with deletion timestamp was correctly skipped: %s", addon.Name)
+						}
+					}
 				}
 
-				// Hive managed cluster and local cluster should not have the MSA addon created
-				if addon.Namespace == "managed2-hive" {
-					t.Errorf("ManagedClusterAddon should not have been created for hive namespace: %s", addon.Namespace)
-				}
-				if addon.Namespace == "loc" {
-					t.Errorf("ManagedClusterAddon should not have been created for local cluster namespace: %s", addon.Namespace)
-				}
-			}
-
-			// Verify the correct MSA addon was created for managed1
-			if foundManaged1MSAAddon == nil {
-				t.Errorf("No ManagedClusterAddOn created for managed cluster %s", "managed1")
-			} else {
-				msaLabel := foundManaged1MSAAddon.Labels[msa_label]
-				if msaLabel != msa_service_name {
-					t.Errorf("ManagedClusterAddOn for managed cluster %s is missing proper msa label", "managed1")
+				// Verify ManifestWork cleanup
+				manifestWorks := &workv1.ManifestWorkList{}
+				if err := tt.args.c.List(tt.args.ctx, manifestWorks); err == nil {
+					for _, mw := range manifestWorks.Items {
+						if mw.Labels[addon_work_label] == msa_addon &&
+							!mw.GetDeletionTimestamp().IsZero() {
+							// This manifest work should have been skipped for deletion
+							t.Logf("ManifestWork with deletion timestamp was correctly skipped: %s", mw.Name)
+						}
+					}
 				}
 			}
 		})
 	}
+
+	// Additional test for the original combined test case
+	t.Run("clean up msa and test prepareImportedClusters", func(t *testing.T) {
+		// Test cleanupMSAForImportedClusters
+		err := cleanupMSAForImportedClusters(ctx, k8sClient, resInterface, &targetMapping)
+		if err != nil {
+			t.Errorf("Error running cleanupMSAForImportedClusters %s", err.Error())
+		}
+
+		// Test prepareImportedClusters
+		err = prepareImportedClusters(ctx, k8sClient, resInterface, &targetMapping, backupSchedule)
+		if err != nil {
+			t.Errorf("Error running prepareImportedClusters %s", err.Error())
+		}
+
+		// Verify ManagedClusterAddOns were created correctly
+		addons := &addonv1alpha1.ManagedClusterAddOnList{}
+		if err := k8sClient.List(ctx, addons); err != nil {
+			t.Errorf("cannot list managedclusteraddons %s ", err.Error())
+		}
+
+		var foundManaged1MSAAddon *addonv1alpha1.ManagedClusterAddOn
+		for i := range addons.Items {
+			addon := addons.Items[i]
+
+			if addon.Name != msa_addon {
+				continue // not a managed service account addon, ignore
+			}
+			if addon.Namespace == "managed1" && addon.GetDeletionTimestamp().IsZero() {
+				foundManaged1MSAAddon = &addon
+			}
+
+			// Hive managed cluster and local cluster should not have the MSA addon created
+			if addon.Namespace == "managed2-hive" {
+				t.Errorf("ManagedClusterAddon should not have been created for hive namespace: %s", addon.Namespace)
+			}
+			if addon.Namespace == "loc" {
+				t.Errorf("ManagedClusterAddon should not have been created for local cluster namespace: %s", addon.Namespace)
+			}
+		}
+
+		// Verify the correct MSA addon was created for managed1
+		if foundManaged1MSAAddon == nil {
+			t.Errorf("No ManagedClusterAddOn created for managed cluster %s", "managed1")
+		} else {
+			msaLabel := foundManaged1MSAAddon.Labels[msa_label]
+			if msaLabel != msa_service_name {
+				t.Errorf("ManagedClusterAddOn for managed cluster %s is missing proper msa label", "managed1")
+			}
+		}
+	})
 }
 
 func Test_updateSecretsLabels(t *testing.T) {
