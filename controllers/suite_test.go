@@ -61,9 +61,6 @@ import (
 
 var k8sClient client.Client
 var testEnv *envtest.Environment
-
-var managedClusterK8sClient client.Client
-var testEnvManagedCluster *envtest.Environment
 var fakeDiscovery *discoveryclient.DiscoveryClient
 var server *httptest.Server
 var resourcesToBackup []string
@@ -116,7 +113,7 @@ var _ = BeforeSuite(func() {
 
 	// Setup test environments
 	By("starting test environments")
-	_, _, err = setupTestEnvironments()
+	_, err = setupTestEnvironments()
 	Expect(err).NotTo(HaveOccurred())
 
 	// Setup schemes
@@ -183,12 +180,6 @@ var _ = AfterSuite(func() {
 		err := testEnv.Stop()
 		return err == nil
 	}, time.Minute*1, time.Millisecond*250).Should(BeTrue())
-
-	Eventually(func() bool {
-		err := testEnvManagedCluster.Stop()
-		return err == nil
-	}, time.Minute*1, time.Millisecond*250).Should(BeTrue())
-
 })
 
 // setupAPIResourceLists creates all the API resource lists needed for testing
@@ -671,7 +662,7 @@ func setupSchemes() error {
 }
 
 // setupTestEnvironments creates and configures the test environments
-func setupTestEnvironments() (*envtest.Environment, *envtest.Environment, error) {
+func setupTestEnvironments() (*envtest.Environment, error) {
 	testEnv = &envtest.Environment{
 		CRDDirectoryPaths: []string{
 			filepath.Join("..", "config", "crd", "bases"),
@@ -680,27 +671,15 @@ func setupTestEnvironments() (*envtest.Environment, *envtest.Environment, error)
 		ErrorIfCRDPathMissing: true,
 	}
 
-	testEnvManagedCluster = &envtest.Environment{} // no CRDs for managedcluster
-
-	managedClusterCfg, err := testEnvManagedCluster.Start()
-	if err != nil {
-		return nil, nil, err
-	}
-
 	cfg, err := testEnv.Start()
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	k8sClient, err = client.New(cfg, client.Options{Scheme: scheme.Scheme})
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
-	managedClusterK8sClient, err = client.New(managedClusterCfg, client.Options{Scheme: scheme.Scheme})
-	if err != nil {
-		return nil, nil, err
-	}
-
-	return testEnv, testEnvManagedCluster, nil
+	return testEnv, nil
 }
