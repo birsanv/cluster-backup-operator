@@ -283,18 +283,39 @@ func Test_executePostRestoreTasks(t *testing.T) {
 		createSecret(obs_secret_name, obs_addon_ns, map[string]string{}, nil, nil),
 	)
 
+	// Setup client with local cluster for testing
+	k8sClientWithLocalCluster := CreateTestClientOrFail(t,
+		createNamespace("velero-ns"),
+		createNamespace(obs_addon_ns),
+		createSecret(obs_secret_name, obs_addon_ns, map[string]string{}, nil, nil),
+		createManagedCluster("local-cluster", true).object,
+		createManagedCluster("remote-cluster1", false).object,
+		createManagedCluster("remote-cluster2", false).object,
+	)
+
+	// Setup client with no local cluster (empty local cluster name)
+	k8sClientNoLocalCluster := CreateTestClientOrFail(t,
+		createNamespace("velero-ns"),
+		createNamespace(obs_addon_ns),
+		createSecret(obs_secret_name, obs_addon_ns, map[string]string{}, nil, nil),
+		createManagedCluster("remote-cluster1", false).object,
+		createManagedCluster("remote-cluster2", false).object,
+	)
+
 	type args struct {
 		ctx     context.Context
 		c       client.Client
 		restore *v1beta1.Restore
 	}
 	tests := []struct {
-		name string
-		args args
-		want bool
+		name                   string
+		args                   args
+		want                   bool
+		wantObsSecretDeleted   bool
+		setupAdditionalSecrets func(client.Client)
 	}{
 		{
-			name: "post activation  should NOT run now, managed clusters are skipped",
+			name: "post activation should NOT run - managed clusters are skipped",
 			args: args{
 				ctx: context.Background(),
 				c:   k8sClient1,
@@ -304,10 +325,11 @@ func Test_executePostRestoreTasks(t *testing.T) {
 					veleroResourcesBackupName(latestBackupStr).
 					phase(v1beta1.RestorePhaseFinished).object,
 			},
-			want: false,
+			want:                 false,
+			wantObsSecretDeleted: false,
 		},
 		{
-			name: "post activation  should run now",
+			name: "post activation should NOT run - restore phase is running",
 			args: args{
 				ctx: context.Background(),
 				c:   k8sClient1,
@@ -315,22 +337,165 @@ func Test_executePostRestoreTasks(t *testing.T) {
 					veleroManagedClustersBackupName(latestBackupStr).
 					veleroCredentialsBackupName(latestBackupStr).
 					veleroResourcesBackupName(latestBackupStr).
+					phase(v1beta1.RestorePhaseRunning).object,
+			},
+			want:                 false,
+			wantObsSecretDeleted: false,
+		},
+		{
+			name: "post activation should NOT run - restore phase is error",
+			args: args{
+				ctx: context.Background(),
+				c:   k8sClient1,
+				restore: createACMRestore("Restore", "velero-ns").
+					veleroManagedClustersBackupName(latestBackupStr).
+					veleroCredentialsBackupName(latestBackupStr).
+					veleroResourcesBackupName(latestBackupStr).
+					phase(v1beta1.RestorePhaseError).object,
+			},
+			want:                 false,
+			wantObsSecretDeleted: false,
+		},
+		{
+			name: "post activation should run - restore phase finished",
+			args: args{
+				ctx: context.Background(),
+				c:   k8sClientWithLocalCluster,
+				restore: createACMRestore("Restore", "velero-ns").
+					veleroManagedClustersBackupName(latestBackupStr).
+					veleroCredentialsBackupName(latestBackupStr).
+					veleroResourcesBackupName(latestBackupStr).
 					phase(v1beta1.RestorePhaseFinished).object,
 			},
-			want: true,
+			want:                 true,
+			wantObsSecretDeleted: true,
+		},
+		{
+			name: "post activation should run - restore phase finished with errors",
+			args: args{
+				ctx: context.Background(),
+				c:   k8sClientWithLocalCluster,
+				restore: createACMRestore("Restore2", "velero-ns").
+					veleroManagedClustersBackupName(latestBackupStr).
+					veleroCredentialsBackupName(latestBackupStr).
+					veleroResourcesBackupName(latestBackupStr).
+					phase(v1beta1.RestorePhaseFinishedWithErrors).object,
+			},
+			want:                 true,
+			wantObsSecretDeleted: true,
+		},
+		{
+			name: "post activation should run - no local cluster found but clusters exist",
+			args: args{
+				ctx: context.Background(),
+				c:   k8sClientNoLocalCluster,
+				restore: createACMRestore("Restore3", "velero-ns").
+					veleroManagedClustersBackupName(latestBackupStr).
+					veleroCredentialsBackupName(latestBackupStr).
+					veleroResourcesBackupName(latestBackupStr).
+					phase(v1beta1.RestorePhaseFinished).object,
+			},
+			want:                 true,
+			wantObsSecretDeleted: true,
+		},
+		{
+			name: "post activation with auto-import secrets",
+			args: args{
+				ctx: context.Background(),
+				c:   k8sClientWithLocalCluster,
+				restore: createACMRestore("Restore4", "velero-ns").
+					veleroManagedClustersBackupName(latestBackupStr).
+					veleroCredentialsBackupName(latestBackupStr).
+					veleroResourcesBackupName(latestBackupStr).
+					phase(v1beta1.RestorePhaseFinished).object,
+			},
+			want:                 true,
+			wantObsSecretDeleted: true,
+			setupAdditionalSecrets: func(c client.Client) {
+				// Create some auto-import secrets to test MSA processing
+				secret1 := createSecret("auto-import-account-cluster1", "cluster1",
+					map[string]string{},
+					map[string]string{msa_label: msa_service_name},
+					map[string][]byte{"token": []byte("test-token-1"), "server": []byte("https://cluster1.example.com")})
+				secret2 := createSecret("auto-import-account-cluster2", "cluster2",
+					map[string]string{},
+					map[string]string{msa_label: msa_service_name},
+					map[string][]byte{"token": []byte("test-token-2"), "server": []byte("https://cluster2.example.com")})
+				_ = c.Create(context.Background(), secret1)
+				_ = c.Create(context.Background(), secret2)
+			},
+		},
+		{
+			name: "post activation should run - empty managed clusters list",
+			args: args{
+				ctx: context.Background(),
+				c:   k8sClient1, // No managed clusters in this client
+				restore: createACMRestore("Restore5", "velero-ns").
+					veleroManagedClustersBackupName(latestBackupStr).
+					veleroCredentialsBackupName(latestBackupStr).
+					veleroResourcesBackupName(latestBackupStr).
+					phase(v1beta1.RestorePhaseFinished).object,
+			},
+			want:                 true,
+			wantObsSecretDeleted: true,
+		},
+		{
+			name: "post activation should run with started phase",
+			args: args{
+				ctx: context.Background(),
+				c:   k8sClientWithLocalCluster,
+				restore: createACMRestore("Restore6", "velero-ns").
+					veleroManagedClustersBackupName(latestBackupStr).
+					veleroCredentialsBackupName(latestBackupStr).
+					veleroResourcesBackupName(latestBackupStr).
+					phase(v1beta1.RestorePhaseStarted).object,
+			},
+			want:                 false,
+			wantObsSecretDeleted: false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := executePostRestoreTasks(tt.args.ctx, tt.args.c,
-				tt.args.restore); got != tt.want {
-				t.Errorf("executePostRestoreTasks() returns = %v, want %v", got, tt.want)
+			// Setup additional secrets if needed
+			if tt.setupAdditionalSecrets != nil {
+				tt.setupAdditionalSecrets(tt.args.c)
+			}
+
+			// Check initial obs secret state for some clients
+			obsSecretExistsBefore := false
+			secret := corev1.Secret{}
+			if err := tt.args.c.Get(context.Background(), types.NamespacedName{
+				Name:      obs_secret_name,
+				Namespace: obs_addon_ns,
+			}, &secret); err == nil {
+				obsSecretExistsBefore = true
+			}
+
+			// Execute the function
+			got := executePostRestoreTasks(tt.args.ctx, tt.args.c, tt.args.restore)
+
+			// Verify the return value
+			if got != tt.want {
+				t.Errorf("executePostRestoreTasks() = %v, want %v", got, tt.want)
+			}
+
+			// Verify obs secret deletion
+			secretExistsAfter := false
+			if err := tt.args.c.Get(context.Background(), types.NamespacedName{
+				Name:      obs_secret_name,
+				Namespace: obs_addon_ns,
+			}, &secret); err == nil {
+				secretExistsAfter = true
+			}
+
+			if tt.wantObsSecretDeleted && obsSecretExistsBefore && secretExistsAfter {
+				t.Errorf("Expected obs secret to be deleted, but it still exists")
 			}
 		})
 	}
 
-	// this should be deleted
+	// Final verification that obs secret was deleted from the main test client
 	secret := corev1.Secret{}
 	if err := k8sClient1.Get(context.Background(), types.NamespacedName{
 		Name:      obs_secret_name,
