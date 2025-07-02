@@ -17,7 +17,9 @@ limitations under the License.
 package controllers
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -64,6 +66,8 @@ var testEnv *envtest.Environment
 var fakeDiscovery *discoveryclient.DiscoveryClient
 var server *httptest.Server
 var resourcesToBackup []string
+var cancel context.CancelFunc
+var managerDone chan struct{} // Channel to signal when manager has stopped
 
 // Test constants
 const (
@@ -161,11 +165,19 @@ var _ = BeforeSuite(func() {
 	}).SetupWithManager(mgr)
 	Expect(err).ToNot(HaveOccurred())
 
-	// Start manager
+	// Create a context that can be cancelled for proper manager shutdown
+	var ctx context.Context
+	ctx, cancel = context.WithCancel(context.Background())
+	managerDone = make(chan struct{})
+
+	// Start manager with cancellable context
 	go func() {
 		defer GinkgoRecover()
-		err = mgr.Start(ctrl.SetupSignalHandler())
-		Expect(err).ToNot(HaveOccurred())
+		defer close(managerDone) // Signal when manager goroutine exits
+		err = mgr.Start(ctx)
+		if err != nil && !errors.Is(err, context.Canceled) {
+			Expect(err).ToNot(HaveOccurred())
+		}
 	}()
 
 	// Set resources to backup for tests
@@ -176,6 +188,24 @@ var _ = BeforeSuite(func() {
 var _ = AfterSuite(func() {
 	By("tearing down the test environment")
 
+	// First, stop the controller manager gracefully
+	if cancel != nil {
+		By("stopping controller manager")
+		cancel()
+
+		// Wait for the manager to actually shut down using the done channel
+		By("waiting for controller manager to stop")
+		Eventually(func() bool {
+			select {
+			case <-managerDone:
+				return true
+			default:
+				return false
+			}
+		}, time.Second*10, time.Millisecond*100).Should(BeTrue())
+	}
+
+	// Then stop the test environment
 	Eventually(func() bool {
 		err := testEnv.Stop()
 		return err == nil
