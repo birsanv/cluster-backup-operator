@@ -1645,6 +1645,7 @@ func Test_updateLabelsForActiveResources(t *testing.T) {
 				acmRestore: createACMRestore("acm-restore", "ns").
 					syncRestoreWithNewBackups(true).
 					restoreSyncInterval(metav1.Duration{Duration: time.Minute * 20}).
+					phase(v1beta1.RestorePhaseEnabled).
 					cleanupBeforeRestore(v1beta1.CleanupTypeRestored).
 					veleroManagedClustersBackupName(latestBackupStr).
 					veleroCredentialsBackupName(latestBackupStr).
@@ -1717,6 +1718,7 @@ func Test_updateLabelsForActiveResources(t *testing.T) {
 				acmRestore: createACMRestore("acm-restore", "ns").
 					syncRestoreWithNewBackups(true).
 					restoreSyncInterval(metav1.Duration{Duration: time.Minute * 20}).
+					phase(v1beta1.RestorePhaseEnabled).
 					cleanupBeforeRestore(v1beta1.CleanupTypeRestored).
 					veleroManagedClustersBackupName(latestBackupStr).
 					veleroCredentialsBackupName(latestBackupStr).
@@ -1850,7 +1852,7 @@ func Test_credentialsRestoreWithoutManagedClusters(t *testing.T) {
 // Test_restoreCase1_SkipClustersLatestCredsSync tests Case 1:
 // ManagedClusters=skip, Credentials=latest, Resources=latest, Sync=true
 //
-// Expected: Credentials and ResourcesGeneric with NotIn cluster-activation, no -active suffix
+// Expected: Credentials and ResourcesGeneric with NO label selector, no -active suffix
 func Test_restoreCase1_SkipClustersLatestCredsSync(t *testing.T) {
 	skipRestoreStr := "skip"
 	latestBackupStr := "latest"
@@ -1879,17 +1881,8 @@ func Test_restoreCase1_SkipClustersLatestCredsSync(t *testing.T) {
 		}
 
 		restoreObj := veleroRestoresToCreate[Credentials]
-		if !hasActivationLabel(*restoreObj) {
-			t.Errorf("Expected NotIn cluster-activation label selector")
-		}
-
-		// Verify it's NotIn
-		if restoreObj.Spec.LabelSelector != nil {
-			for _, req := range restoreObj.Spec.LabelSelector.MatchExpressions {
-				if req.Key == backupCredsClusterLabel && req.Operator != "NotIn" {
-					t.Errorf("Expected operator NotIn, got %s", req.Operator)
-				}
-			}
+		if hasActivationLabel(*restoreObj) {
+			t.Errorf("Expected NO label selector")
 		}
 
 		if strings.HasSuffix(restoreObj.Name, "-active") {
@@ -1921,8 +1914,8 @@ func Test_restoreCase1_SkipClustersLatestCredsSync(t *testing.T) {
 		}
 
 		restoreObj := veleroRestoresToCreate[ResourcesGeneric]
-		if !hasActivationLabel(*restoreObj) {
-			t.Errorf("Expected NotIn cluster-activation label selector")
+		if hasActivationLabel(*restoreObj) {
+			t.Errorf("Expected NO label selector")
 		}
 
 		if strings.HasSuffix(restoreObj.Name, "-active") {
@@ -1934,7 +1927,7 @@ func Test_restoreCase1_SkipClustersLatestCredsSync(t *testing.T) {
 // Test_restoreCase2_SkipClustersLatestCredsNoSync tests Case 2:
 // ManagedClusters=skip, Credentials=latest, Resources=latest, Sync=false
 //
-// Expected: Credentials and ResourcesGeneric with NotIn cluster-activation, no -active suffix
+// Expected: Credentials and ResourcesGeneric with NO label selector, no -active suffix
 func Test_restoreCase2_SkipClustersLatestCredsNoSync(t *testing.T) {
 	skipRestoreStr := "skip"
 	latestBackupStr := "latest"
@@ -1961,8 +1954,8 @@ func Test_restoreCase2_SkipClustersLatestCredsNoSync(t *testing.T) {
 		}
 
 		restoreObj := veleroRestoresToCreate[Credentials]
-		if !hasActivationLabel(*restoreObj) {
-			t.Errorf("Expected NotIn cluster-activation label selector")
+		if hasActivationLabel(*restoreObj) {
+			t.Errorf("Expected NO label selector")
 		}
 
 		if strings.HasSuffix(restoreObj.Name, "-active") {
@@ -1992,8 +1985,8 @@ func Test_restoreCase2_SkipClustersLatestCredsNoSync(t *testing.T) {
 		}
 
 		restoreObj := veleroRestoresToCreate[ResourcesGeneric]
-		if !hasActivationLabel(*restoreObj) {
-			t.Errorf("Expected NotIn cluster-activation label selector")
+		if hasActivationLabel(*restoreObj) {
+			t.Errorf("Expected NO label selector")
 		}
 
 		if strings.HasSuffix(restoreObj.Name, "-active") {
@@ -2252,7 +2245,7 @@ func Test_restoreCase5_LatestClustersSkipCredsSkipResourcesNoSync(t *testing.T) 
 // Test_restoreCase6_SkipClustersLatestCredsLatestResourcesNoSync tests Case 6:
 // ManagedClusters=skip, Credentials=latest, Resources=latest, Sync=false
 //
-// Expected: Both Credentials and ResourcesGeneric with NotIn cluster-activation, no -active suffix
+// Expected: Both Credentials and ResourcesGeneric with NO label selector, no -active suffix
 func Test_restoreCase6_SkipClustersLatestCredsLatestResourcesNoSync(t *testing.T) {
 	skipRestoreStr := "skip"
 	latestBackupStr := "latest"
@@ -2279,8 +2272,8 @@ func Test_restoreCase6_SkipClustersLatestCredsLatestResourcesNoSync(t *testing.T
 		}
 
 		restoreObj := veleroRestoresToCreate[Credentials]
-		if !hasActivationLabel(*restoreObj) {
-			t.Errorf("Expected NotIn cluster-activation label selector")
+		if hasActivationLabel(*restoreObj) {
+			t.Errorf("Expected NO label selector")
 		}
 
 		if strings.HasSuffix(restoreObj.Name, "-active") {
@@ -2310,8 +2303,8 @@ func Test_restoreCase6_SkipClustersLatestCredsLatestResourcesNoSync(t *testing.T
 		}
 
 		restoreObj := veleroRestoresToCreate[ResourcesGeneric]
-		if !hasActivationLabel(*restoreObj) {
-			t.Errorf("Expected NotIn cluster-activation label selector")
+		if hasActivationLabel(*restoreObj) {
+			t.Errorf("Expected NO label selector")
 		}
 
 		if strings.HasSuffix(restoreObj.Name, "-active") {
@@ -2396,7 +2389,7 @@ func Test_restoreCase7_SpecificBackupNamesNoSync(t *testing.T) {
 // Test_restoreCase8_SkipClustersSpecificBackupNamesNoSync tests Case 8:
 // ManagedClusters=skip, Credentials=name, Resources=name, Sync=false
 //
-// Expected: Both Credentials and ResourcesGeneric with NotIn cluster-activation, no -active suffix
+// Expected: Both Credentials and ResourcesGeneric with NO label selector, no -active suffix
 func Test_restoreCase8_SkipClustersSpecificBackupNamesNoSync(t *testing.T) {
 	skipRestoreStr := "skip"
 	specificBackupName := "acm-credentials-schedule-20251029181055"
@@ -2423,8 +2416,8 @@ func Test_restoreCase8_SkipClustersSpecificBackupNamesNoSync(t *testing.T) {
 		}
 
 		restoreObj := veleroRestoresToCreate[Credentials]
-		if !hasActivationLabel(*restoreObj) {
-			t.Errorf("Expected NotIn cluster-activation label selector")
+		if hasActivationLabel(*restoreObj) {
+			t.Errorf("Expected NO label selector")
 		}
 
 		if strings.HasSuffix(restoreObj.Name, "-active") {
@@ -2454,8 +2447,8 @@ func Test_restoreCase8_SkipClustersSpecificBackupNamesNoSync(t *testing.T) {
 		}
 
 		restoreObj := veleroRestoresToCreate[ResourcesGeneric]
-		if !hasActivationLabel(*restoreObj) {
-			t.Errorf("Expected NotIn cluster-activation label selector")
+		if hasActivationLabel(*restoreObj) {
+			t.Errorf("Expected NO label selector")
 		}
 
 		if strings.HasSuffix(restoreObj.Name, "-active") {
@@ -2494,7 +2487,7 @@ func Test_restoreLabelSelectorScenarios(t *testing.T) {
 			resources:             latestBackupStr,
 			sync:                  true,
 			resourceType:          Credentials,
-			wantLabelSelector:     "NotIn",
+			wantLabelSelector:     "none",
 			wantActiveSuffix:      false,
 			wantIsCredsActiveStep: false,
 		},
@@ -2505,7 +2498,7 @@ func Test_restoreLabelSelectorScenarios(t *testing.T) {
 			resources:             latestBackupStr,
 			sync:                  true,
 			resourceType:          ResourcesGeneric,
-			wantLabelSelector:     "NotIn",
+			wantLabelSelector:     "none",
 			wantActiveSuffix:      false,
 			wantIsCredsActiveStep: false,
 		},
@@ -2517,7 +2510,7 @@ func Test_restoreLabelSelectorScenarios(t *testing.T) {
 			resources:             latestBackupStr,
 			sync:                  false,
 			resourceType:          Credentials,
-			wantLabelSelector:     "NotIn",
+			wantLabelSelector:     "none",
 			wantActiveSuffix:      false,
 			wantIsCredsActiveStep: false,
 		},
@@ -2528,7 +2521,7 @@ func Test_restoreLabelSelectorScenarios(t *testing.T) {
 			resources:             latestBackupStr,
 			sync:                  false,
 			resourceType:          ResourcesGeneric,
-			wantLabelSelector:     "NotIn",
+			wantLabelSelector:     "none",
 			wantActiveSuffix:      false,
 			wantIsCredsActiveStep: false,
 		},
@@ -2632,7 +2625,7 @@ func Test_restoreLabelSelectorScenarios(t *testing.T) {
 			resources:             specificBackupName,
 			sync:                  false,
 			resourceType:          Credentials,
-			wantLabelSelector:     "NotIn",
+			wantLabelSelector:     "none",
 			wantActiveSuffix:      false,
 			wantIsCredsActiveStep: false,
 		},
@@ -2643,7 +2636,7 @@ func Test_restoreLabelSelectorScenarios(t *testing.T) {
 			resources:             specificBackupName,
 			sync:                  false,
 			resourceType:          ResourcesGeneric,
-			wantLabelSelector:     "NotIn",
+			wantLabelSelector:     "none",
 			wantActiveSuffix:      false,
 			wantIsCredsActiveStep: false,
 		},

@@ -618,6 +618,21 @@ func (r *RestoreReconciler) initVeleroRestores(
 	return false, "", nil
 }
 
+// checkCredsActiveExists checks if a credentials-active Velero restore exists
+func checkCredsActiveExists(ctx context.Context, c client.Client, restore *v1beta1.Restore) bool {
+	veleroRestoreList := &veleroapi.RestoreList{}
+	if err := c.List(ctx, veleroRestoreList, client.InNamespace(restore.Namespace)); err == nil {
+		for i := range veleroRestoreList.Items {
+			if strings.Contains(veleroRestoreList.Items[i].Name, restore.Name) &&
+				strings.Contains(veleroRestoreList.Items[i].Name, "credentials") &&
+				strings.HasSuffix(veleroRestoreList.Items[i].Name, "-active") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // for an activation phase update restore labels to include activation resources
 func updateLabelsForActiveResources(
 	ctx context.Context,
@@ -646,18 +661,7 @@ func updateLabelsForActiveResources(
 	// Check if credentials-active Velero restore exists (indicates activation scenario)
 	credsActiveExists := false
 	if key == ResourcesGeneric {
-		// Look for any credentials restore with -active suffix
-		veleroRestoreList := &veleroapi.RestoreList{}
-		if err := c.List(ctx, veleroRestoreList, client.InNamespace(restore.Namespace)); err == nil {
-			for i := range veleroRestoreList.Items {
-				if strings.Contains(veleroRestoreList.Items[i].Name, restore.Name) &&
-					strings.Contains(veleroRestoreList.Items[i].Name, "credentials") &&
-					strings.HasSuffix(veleroRestoreList.Items[i].Name, "-active") {
-					credsActiveExists = true
-					break
-				}
-			}
-		}
+		credsActiveExists = checkCredsActiveExists(ctx, c, restore)
 	}
 
 	if (key == ResourcesGeneric && veleroRestoresToCreate[ManagedClusters] != nil &&
