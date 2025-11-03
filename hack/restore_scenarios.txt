@@ -263,7 +263,7 @@ Result :
 
 a. status:
   lastMessage: 'waiting for PVC mongo-storage:open-cluster-management-backup'
-b. credentials-active is created
+b. credentials restore is created ( restore all , no labelSelector)
 c. Restore goes to Started state. 
 
 
@@ -282,3 +282,37 @@ spec:
 
 Result :
 Restore goes to finish state. Generic is created; no -active restore ( restores have no labelSelector)
+
+Case 6:
+Skip managed clusters; activation resources should not be restored
+
+apiVersion: cluster.open-cluster-management.io/v1beta1
+kind: Restore
+metadata:
+  name: restore-acm-all-sync
+  namespace: open-cluster-management-backup
+spec:
+  cleanupBeforeRestore: None
+  veleroManagedClustersBackupName: skip
+  veleroCredentialsBackupName: latest
+  veleroResourcesBackupName: latest
+
+Result:
+Restore creds and generic with labelSelector ( notIn cluster-activation)
+
+Case 6:
+Skip managed clusters, use backup name; activation resources should not be restored
+
+apiVersion: cluster.open-cluster-management.io/v1beta1
+kind: Restore
+metadata:
+  name: restore-acm-all-sync
+  namespace: open-cluster-management-backup
+spec:
+  cleanupBeforeRestore: None
+  veleroCredentialsBackupName: acm-credentials-schedule-20251103183520
+  veleroManagedClustersBackupName: skip
+  veleroResourcesBackupName: acm-resources-schedule-20251103183521
+
+Result:
+Restore creds and generic with labelSelector ( notIn cluster-activation)
