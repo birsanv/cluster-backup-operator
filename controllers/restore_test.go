@@ -1734,7 +1734,11 @@ func Test_updateLabelsForActiveResources(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := updateLabelsForActiveResources(tt.args.acmRestore, tt.args.restype, tt.args.veleroRestoresToCreate)
+			// Create a fake client for the test
+			fakeClient := fake.NewClientBuilder().Build()
+			got := updateLabelsForActiveResources(
+				context.Background(), fakeClient, tt.args.acmRestore, tt.args.restype, tt.args.veleroRestoresToCreate,
+			)
 			if got != tt.want {
 				t.Errorf("error updating labels for: %s", tt.name)
 			}
@@ -1771,7 +1775,10 @@ func Test_credentialsRestoreWithSpecificBackupName(t *testing.T) {
 	}
 
 	// Call the function
-	isCredsClsOnActiveStep := updateLabelsForActiveResources(acmRestore, Credentials, veleroRestoresToCreate)
+	fakeClient := fake.NewClientBuilder().Build()
+	isCredsClsOnActiveStep := updateLabelsForActiveResources(
+		context.Background(), fakeClient, acmRestore, Credentials, veleroRestoresToCreate,
+	)
 
 	// Verify return value
 	if !isCredsClsOnActiveStep {
@@ -1815,7 +1822,10 @@ func Test_credentialsRestoreWithoutManagedClusters(t *testing.T) {
 	}
 
 	// Call the function
-	isCredsClsOnActiveStep := updateLabelsForActiveResources(acmRestore, Credentials, veleroRestoresToCreate)
+	fakeClient := fake.NewClientBuilder().Build()
+	isCredsClsOnActiveStep := updateLabelsForActiveResources(
+		context.Background(), fakeClient, acmRestore, Credentials, veleroRestoresToCreate,
+	)
 
 	// Verify return value (should be false - no PVC wait needed)
 	if isCredsClsOnActiveStep {
@@ -1859,7 +1869,10 @@ func Test_restoreCase1_SkipClustersLatestCredsSync(t *testing.T) {
 			Credentials: createRestore("credentials-restore", "ns").object,
 		}
 
-		isCredsClsOnActiveStep := updateLabelsForActiveResources(acmRestore, Credentials, veleroRestoresToCreate)
+		fakeClient := fake.NewClientBuilder().Build()
+		isCredsClsOnActiveStep := updateLabelsForActiveResources(
+			context.Background(), fakeClient, acmRestore, Credentials, veleroRestoresToCreate,
+		)
 
 		if isCredsClsOnActiveStep {
 			t.Errorf("Expected isCredsClsOnActiveStep=false, got true")
@@ -1898,7 +1911,10 @@ func Test_restoreCase1_SkipClustersLatestCredsSync(t *testing.T) {
 			ResourcesGeneric: createRestore("generic-restore", "ns").object,
 		}
 
-		isCredsClsOnActiveStep := updateLabelsForActiveResources(acmRestore, ResourcesGeneric, veleroRestoresToCreate)
+		fakeClient := fake.NewClientBuilder().Build()
+		isCredsClsOnActiveStep := updateLabelsForActiveResources(
+			context.Background(), fakeClient, acmRestore, ResourcesGeneric, veleroRestoresToCreate,
+		)
 
 		if isCredsClsOnActiveStep {
 			t.Errorf("Expected isCredsClsOnActiveStep=false, got true")
@@ -1935,7 +1951,10 @@ func Test_restoreCase2_SkipClustersLatestCredsNoSync(t *testing.T) {
 			Credentials: createRestore("credentials-restore", "ns").object,
 		}
 
-		isCredsClsOnActiveStep := updateLabelsForActiveResources(acmRestore, Credentials, veleroRestoresToCreate)
+		fakeClient := fake.NewClientBuilder().Build()
+		isCredsClsOnActiveStep := updateLabelsForActiveResources(
+			context.Background(), fakeClient, acmRestore, Credentials, veleroRestoresToCreate,
+		)
 
 		if isCredsClsOnActiveStep {
 			t.Errorf("Expected isCredsClsOnActiveStep=false, got true")
@@ -1963,7 +1982,10 @@ func Test_restoreCase2_SkipClustersLatestCredsNoSync(t *testing.T) {
 			ResourcesGeneric: createRestore("generic-restore", "ns").object,
 		}
 
-		isCredsClsOnActiveStep := updateLabelsForActiveResources(acmRestore, ResourcesGeneric, veleroRestoresToCreate)
+		fakeClient := fake.NewClientBuilder().Build()
+		isCredsClsOnActiveStep := updateLabelsForActiveResources(
+			context.Background(), fakeClient, acmRestore, ResourcesGeneric, veleroRestoresToCreate,
+		)
 
 		if isCredsClsOnActiveStep {
 			t.Errorf("Expected isCredsClsOnActiveStep=false, got true")
@@ -2000,7 +2022,10 @@ func Test_restoreCase3_LatestClustersLatestCredsNoSync(t *testing.T) {
 			ManagedClusters: createRestore("clusters-restore", "ns").object,
 		}
 
-		isCredsClsOnActiveStep := updateLabelsForActiveResources(acmRestore, Credentials, veleroRestoresToCreate)
+		fakeClient := fake.NewClientBuilder().Build()
+		isCredsClsOnActiveStep := updateLabelsForActiveResources(
+			context.Background(), fakeClient, acmRestore, Credentials, veleroRestoresToCreate,
+		)
 
 		if !isCredsClsOnActiveStep {
 			t.Errorf("Expected isCredsClsOnActiveStep=true, got false")
@@ -2030,7 +2055,10 @@ func Test_restoreCase3_LatestClustersLatestCredsNoSync(t *testing.T) {
 			ManagedClusters:  createRestore("clusters-restore", "ns").object,
 		}
 
-		isCredsClsOnActiveStep := updateLabelsForActiveResources(acmRestore, ResourcesGeneric, veleroRestoresToCreate)
+		fakeClient := fake.NewClientBuilder().Build()
+		isCredsClsOnActiveStep := updateLabelsForActiveResources(
+			context.Background(), fakeClient, acmRestore, ResourcesGeneric, veleroRestoresToCreate,
+		)
 
 		if isCredsClsOnActiveStep {
 			t.Errorf("Expected isCredsClsOnActiveStep=false, got true")
@@ -2068,7 +2096,10 @@ func Test_restoreCase4_LatestClustersSkipCredsLatestResourcesNoSync(t *testing.T
 			ManagedClusters: createRestore("clusters-restore", "ns").object,
 		}
 
-		isCredsClsOnActiveStep := updateLabelsForActiveResources(acmRestore, Credentials, veleroRestoresToCreate)
+		fakeClient := fake.NewClientBuilder().Build()
+		isCredsClsOnActiveStep := updateLabelsForActiveResources(
+			context.Background(), fakeClient, acmRestore, Credentials, veleroRestoresToCreate,
+		)
 
 		if !isCredsClsOnActiveStep {
 			t.Errorf("Expected isCredsClsOnActiveStep=true, got false")
@@ -2107,7 +2138,10 @@ func Test_restoreCase4_LatestClustersSkipCredsLatestResourcesNoSync(t *testing.T
 			ManagedClusters:  createRestore("clusters-restore", "ns").object,
 		}
 
-		isCredsClsOnActiveStep := updateLabelsForActiveResources(acmRestore, ResourcesGeneric, veleroRestoresToCreate)
+		fakeClient := fake.NewClientBuilder().Build()
+		isCredsClsOnActiveStep := updateLabelsForActiveResources(
+			context.Background(), fakeClient, acmRestore, ResourcesGeneric, veleroRestoresToCreate,
+		)
 
 		if isCredsClsOnActiveStep {
 			t.Errorf("Expected isCredsClsOnActiveStep=false, got true")
@@ -2145,7 +2179,10 @@ func Test_restoreCase5_LatestClustersSkipCredsSkipResourcesNoSync(t *testing.T) 
 			ManagedClusters: createRestore("clusters-restore", "ns").object,
 		}
 
-		isCredsClsOnActiveStep := updateLabelsForActiveResources(acmRestore, Credentials, veleroRestoresToCreate)
+		fakeClient := fake.NewClientBuilder().Build()
+		isCredsClsOnActiveStep := updateLabelsForActiveResources(
+			context.Background(), fakeClient, acmRestore, Credentials, veleroRestoresToCreate,
+		)
 
 		if !isCredsClsOnActiveStep {
 			t.Errorf("Expected isCredsClsOnActiveStep=true, got false")
@@ -2183,7 +2220,10 @@ func Test_restoreCase5_LatestClustersSkipCredsSkipResourcesNoSync(t *testing.T) 
 			ManagedClusters:  createRestore("clusters-restore", "ns").object,
 		}
 
-		isCredsClsOnActiveStep := updateLabelsForActiveResources(acmRestore, ResourcesGeneric, veleroRestoresToCreate)
+		fakeClient := fake.NewClientBuilder().Build()
+		isCredsClsOnActiveStep := updateLabelsForActiveResources(
+			context.Background(), fakeClient, acmRestore, ResourcesGeneric, veleroRestoresToCreate,
+		)
 
 		if isCredsClsOnActiveStep {
 			t.Errorf("Expected isCredsClsOnActiveStep=false, got true")
@@ -2229,7 +2269,10 @@ func Test_restoreCase6_SkipClustersLatestCredsLatestResourcesNoSync(t *testing.T
 			Credentials: createRestore("credentials-restore", "ns").object,
 		}
 
-		isCredsClsOnActiveStep := updateLabelsForActiveResources(acmRestore, Credentials, veleroRestoresToCreate)
+		fakeClient := fake.NewClientBuilder().Build()
+		isCredsClsOnActiveStep := updateLabelsForActiveResources(
+			context.Background(), fakeClient, acmRestore, Credentials, veleroRestoresToCreate,
+		)
 
 		if isCredsClsOnActiveStep {
 			t.Errorf("Expected isCredsClsOnActiveStep=false, got true")
@@ -2257,7 +2300,10 @@ func Test_restoreCase6_SkipClustersLatestCredsLatestResourcesNoSync(t *testing.T
 			ResourcesGeneric: createRestore("generic-restore", "ns").object,
 		}
 
-		isCredsClsOnActiveStep := updateLabelsForActiveResources(acmRestore, ResourcesGeneric, veleroRestoresToCreate)
+		fakeClient := fake.NewClientBuilder().Build()
+		isCredsClsOnActiveStep := updateLabelsForActiveResources(
+			context.Background(), fakeClient, acmRestore, ResourcesGeneric, veleroRestoresToCreate,
+		)
 
 		if isCredsClsOnActiveStep {
 			t.Errorf("Expected isCredsClsOnActiveStep=false, got true")
@@ -2294,7 +2340,10 @@ func Test_restoreCase7_SpecificBackupNamesNoSync(t *testing.T) {
 			ManagedClusters: createRestore("clusters-restore", "ns").object,
 		}
 
-		isCredsClsOnActiveStep := updateLabelsForActiveResources(acmRestore, Credentials, veleroRestoresToCreate)
+		fakeClient := fake.NewClientBuilder().Build()
+		isCredsClsOnActiveStep := updateLabelsForActiveResources(
+			context.Background(), fakeClient, acmRestore, Credentials, veleroRestoresToCreate,
+		)
 
 		if !isCredsClsOnActiveStep {
 			t.Errorf("Expected isCredsClsOnActiveStep=true, got false")
@@ -2324,7 +2373,10 @@ func Test_restoreCase7_SpecificBackupNamesNoSync(t *testing.T) {
 			ManagedClusters:  createRestore("clusters-restore", "ns").object,
 		}
 
-		isCredsClsOnActiveStep := updateLabelsForActiveResources(acmRestore, ResourcesGeneric, veleroRestoresToCreate)
+		fakeClient := fake.NewClientBuilder().Build()
+		isCredsClsOnActiveStep := updateLabelsForActiveResources(
+			context.Background(), fakeClient, acmRestore, ResourcesGeneric, veleroRestoresToCreate,
+		)
 
 		if isCredsClsOnActiveStep {
 			t.Errorf("Expected isCredsClsOnActiveStep=false, got true")
@@ -2361,7 +2413,10 @@ func Test_restoreCase8_SkipClustersSpecificBackupNamesNoSync(t *testing.T) {
 			Credentials: createRestore("credentials-restore", "ns").object,
 		}
 
-		isCredsClsOnActiveStep := updateLabelsForActiveResources(acmRestore, Credentials, veleroRestoresToCreate)
+		fakeClient := fake.NewClientBuilder().Build()
+		isCredsClsOnActiveStep := updateLabelsForActiveResources(
+			context.Background(), fakeClient, acmRestore, Credentials, veleroRestoresToCreate,
+		)
 
 		if isCredsClsOnActiveStep {
 			t.Errorf("Expected isCredsClsOnActiveStep=false, got true")
@@ -2389,7 +2444,10 @@ func Test_restoreCase8_SkipClustersSpecificBackupNamesNoSync(t *testing.T) {
 			ResourcesGeneric: createRestore("generic-restore", "ns").object,
 		}
 
-		isCredsClsOnActiveStep := updateLabelsForActiveResources(acmRestore, ResourcesGeneric, veleroRestoresToCreate)
+		fakeClient := fake.NewClientBuilder().Build()
+		isCredsClsOnActiveStep := updateLabelsForActiveResources(
+			context.Background(), fakeClient, acmRestore, ResourcesGeneric, veleroRestoresToCreate,
+		)
 
 		if isCredsClsOnActiveStep {
 			t.Errorf("Expected isCredsClsOnActiveStep=false, got true")
@@ -2624,7 +2682,10 @@ func Test_restoreLabelSelectorScenarios(t *testing.T) {
 			}
 
 			// Call the function
-			isCredsClsOnActiveStep := updateLabelsForActiveResources(acmRestore, tt.resourceType, veleroRestoresToCreate)
+			fakeClient := fake.NewClientBuilder().Build()
+			isCredsClsOnActiveStep := updateLabelsForActiveResources(
+				context.Background(), fakeClient, acmRestore, tt.resourceType, veleroRestoresToCreate,
+			)
 
 			// Verify isCredsClsOnActiveStep
 			if isCredsClsOnActiveStep != tt.wantIsCredsActiveStep {
