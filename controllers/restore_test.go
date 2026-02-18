@@ -1827,7 +1827,7 @@ func Test_isNewBackupAvailable(t *testing.T) {
 			},
 		},
 		{
-			name: "ResourcesGeneric with FailedValidation should trigger retry (line 818-819, 846-855)",
+			name: "ResourcesGeneric with FailedValidation should trigger deletion (not retry in same reconcile)",
 			args: args{
 				ctx:          context.Background(),
 				resourceType: ResourcesGeneric,
@@ -1840,7 +1840,7 @@ func Test_isNewBackupAvailable(t *testing.T) {
 					veleroResourcesBackupName(resourcesBackupName).                                 // Uses Resources backup name
 					veleroGenericResourcesRestoreName(passiveStr + "-" + genericBackupName).object, // Tracks generic restore
 			},
-			want:        true, // Should trigger retry for FailedValidation
+			want:        true, // Returns true because new backup should be detected
 			setupScheme: true,
 			setupObjects: []client.Object{
 				&veleroNamespace,
@@ -1848,12 +1848,12 @@ func Test_isNewBackupAvailable(t *testing.T) {
 				&genericBackup,   // And the actual generic backup
 				createRestore(passiveStr+"-"+genericBackupName, veleroNamespaceName).
 					backupName(genericBackupName).
-					phase(veleroapi.RestorePhaseFailedValidation). // FailedValidation phase
+					phase(veleroapi.RestorePhaseFailedValidation). // FailedValidation phase - will be deleted
 					object,
 			},
 		},
 		{
-			name: "Resources with FailedValidation should trigger retry (line 816-817, 846-855)",
+			name: "Resources with FailedValidation should trigger deletion (not retry in same reconcile)",
 			args: args{
 				ctx:          context.Background(),
 				resourceType: Resources,
@@ -1866,19 +1866,19 @@ func Test_isNewBackupAvailable(t *testing.T) {
 					veleroResourcesBackupName(resourcesBackupName).
 					veleroResourcesRestoreName(passiveStr + "-" + resourcesBackupName).object,
 			},
-			want:        true, // Should trigger retry for FailedValidation
+			want:        true, // Returns true because in EnabledError state with same backup
 			setupScheme: true,
 			setupObjects: []client.Object{
 				&veleroNamespace,
 				&resourcesBackup,
 				createRestore(passiveStr+"-"+resourcesBackupName, veleroNamespaceName).
 					backupName(resourcesBackupName).
-					phase(veleroapi.RestorePhaseFailedValidation).
+					phase(veleroapi.RestorePhaseFailedValidation). // Will be deleted
 					object,
 			},
 		},
 		{
-			name: "ManagedClusters with Failed should trigger retry (line 812-813, 856-864)",
+			name: "ManagedClusters with Failed returns true from isNewBackupAvailable (but initVeleroRestores will skip it)",
 			args: args{
 				ctx:          context.Background(),
 				resourceType: ManagedClusters,
@@ -1891,14 +1891,14 @@ func Test_isNewBackupAvailable(t *testing.T) {
 					veleroResourcesBackupName(latestBackup).
 					veleroManagedClustersRestoreName(passiveStr + "-" + managedClustersBackupName).object,
 			},
-			want:        true, // Should trigger retry
+			want:        true, // isNewBackupAvailable returns true (ACM in EnabledError), but initVeleroRestores will skip
 			setupScheme: true,
 			setupObjects: []client.Object{
 				&veleroNamespace,
 				&managedClustersBackup,
 				createRestore(passiveStr+"-"+managedClustersBackupName, veleroNamespaceName).
 					backupName(managedClustersBackupName).
-					phase(veleroapi.RestorePhaseFailed).
+					phase(veleroapi.RestorePhaseFailed). // Failed phase - initVeleroRestores will skip
 					object,
 			},
 		},

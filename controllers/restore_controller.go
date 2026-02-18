@@ -294,6 +294,10 @@ func (r *RestoreReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		r.cleanupOnRestore(ctx, restore)
 	}
 
+	// Always check for orphaned Velero restores (whose backing backups are gone)
+	// This handles cases where backups are deleted from another cluster
+	r.cleanupOrphanedVeleroRestores(ctx, restore)
+
 	if restore.Spec.SyncRestoreWithNewBackups && !isValidSync {
 		restore.Status.LastMessage = restore.Status.LastMessage +
 			" ; SyncRestoreWithNewBackups option is ignored because " + msg
@@ -384,6 +388,105 @@ func (r *RestoreReconciler) cleanupOnRestore(
 	if cleanupOnRestore || restoreCompleted {
 		rightNow := metav1.Now()
 		acmRestore.Status.CompletionTimestamp = &rightNow
+	}
+}
+
+// cleanupOrphanedVeleroRestores checks if Velero restores owned by this ACM restore
+// still have their backing Velero backups. If a backup is missing (e.g., deleted from
+// another cluster accessing the same storage location), the restore is deleted.
+//
+//nolint:funlen
+func (r *RestoreReconciler) cleanupOrphanedVeleroRestores(
+	ctx context.Context,
+	acmRestore *v1beta1.Restore,
+) {
+	restoreLogger := log.FromContext(ctx)
+
+	// Build a set of current/tracked Velero restore names from the ACM restore status
+	// These are the restores we want to KEEP (not delete)
+	currentRestoreNames := make(map[string]bool)
+	if acmRestore.Status.VeleroManagedClustersRestoreName != "" {
+		currentRestoreNames[acmRestore.Status.VeleroManagedClustersRestoreName] = true
+	}
+	if acmRestore.Status.VeleroResourcesRestoreName != "" {
+		currentRestoreNames[acmRestore.Status.VeleroResourcesRestoreName] = true
+	}
+	if acmRestore.Status.VeleroGenericResourcesRestoreName != "" {
+		currentRestoreNames[acmRestore.Status.VeleroGenericResourcesRestoreName] = true
+	}
+	if acmRestore.Status.VeleroCredentialsRestoreName != "" {
+		currentRestoreNames[acmRestore.Status.VeleroCredentialsRestoreName] = true
+	}
+
+	// Get all Velero restores owned by this ACM restore
+	veleroRestoreList := veleroapi.RestoreList{}
+	if err := r.List(
+		ctx,
+		&veleroRestoreList,
+		client.InNamespace(acmRestore.Namespace),
+		client.MatchingFields{restoreOwnerKey: acmRestore.Name},
+	); err != nil {
+		restoreLogger.Error(err, "Failed to list Velero restores for orphan cleanup")
+		return
+	}
+
+	// Check each restore to see if its backing backup still exists
+	for i := range veleroRestoreList.Items {
+		restore := &veleroRestoreList.Items[i]
+
+		// Skip if this is a current/tracked restore - we don't want to delete it
+		if currentRestoreNames[restore.Name] {
+			continue
+		}
+
+		// Skip if restore is already being deleted
+		if !restore.DeletionTimestamp.IsZero() {
+			continue
+		}
+
+		// Skip if no backup name specified
+		if restore.Spec.BackupName == "" {
+			continue
+		}
+
+		// Check if the backup exists
+		backup := &veleroapi.Backup{}
+		backupKey := types.NamespacedName{
+			Name:      restore.Spec.BackupName,
+			Namespace: restore.Namespace,
+		}
+
+		err := r.Get(ctx, backupKey, backup)
+		if err != nil {
+			if k8serr.IsNotFound(err) {
+				// Backup doesn't exist - delete the orphaned restore
+				restoreLogger.Info(
+					"Deleting orphaned Velero restore - backing backup not found",
+					"restore", restore.Name,
+					"backup", restore.Spec.BackupName,
+				)
+				if delErr := r.Delete(ctx, restore); delErr != nil && !k8serr.IsNotFound(delErr) {
+					restoreLogger.Error(delErr, "Failed to delete orphaned restore", "restore", restore.Name)
+				}
+			}
+			// Other errors are ignored - we'll check again on next reconcile
+			continue
+		}
+
+		// Check if backup is being deleted or in an invalid state
+		if !backup.DeletionTimestamp.IsZero() ||
+			backup.Status.Phase == veleroapi.BackupPhaseDeleting ||
+			backup.Status.Phase == veleroapi.BackupPhaseFailedValidation {
+			restoreLogger.Info(
+				"Deleting orphaned Velero restore - backing backup is being deleted or invalid",
+				"restore", restore.Name,
+				"backup", backup.Name,
+				"backupPhase", backup.Status.Phase,
+			)
+			if delErr := r.Delete(ctx, restore); delErr != nil && !k8serr.IsNotFound(delErr) {
+				restoreLogger.Error(delErr, "Failed to delete restore", "restore", restore.Name)
+			}
+		}
 	}
 }
 
@@ -525,6 +628,7 @@ func (r *RestoreReconciler) initVeleroRestores(
 	restoreOnlyManagedClusters := false
 	if sync {
 		if isNewBackupAvailable(ctx, r.Client, restore, Resources) ||
+			isNewBackupAvailable(ctx, r.Client, restore, ResourcesGeneric) ||
 			isNewBackupAvailable(ctx, r.Client, restore, Credentials) {
 			restoreLogger.Info(
 				"new backups available to sync with for this restore",
@@ -595,11 +699,45 @@ func (r *RestoreReconciler) initVeleroRestores(
 					veleroRestoresToCreate[key].Namespace, veleroRestoresToCreate[key].Name,
 					err.Error()),
 			)
-			if k8serr.IsAlreadyExists(err) && key == Credentials {
-				restore.Status.VeleroCredentialsRestoreName = veleroRestoresToCreate[key].Name
-			}
-			if k8serr.IsAlreadyExists(err) && key == ResourcesGeneric {
-				restore.Status.VeleroGenericResourcesRestoreName = veleroRestoresToCreate[key].Name
+			// If restore already exists, check if it's in FailedValidation state
+			// If so, delete it and requeue to recreate
+			if k8serr.IsAlreadyExists(err) {
+				// Get the existing restore to check its status
+				existingRestore := &veleroapi.Restore{}
+				getErr := r.Get(ctx, types.NamespacedName{
+					Name:      veleroRestoresToCreate[key].Name,
+					Namespace: veleroRestoresToCreate[key].Namespace,
+				}, existingRestore)
+
+				if getErr == nil && existingRestore.Status.Phase == veleroapi.RestorePhaseFailedValidation {
+					// Delete the failed restore and trigger requeue via mustwait flag
+					restoreLogger.Info(
+						"Deleting existing restore with FailedValidation to recreate",
+						"restore", existingRestore.Name,
+						"resourceType", key,
+					)
+					if delErr := r.Delete(ctx, existingRestore); delErr != nil {
+						restoreLogger.Error(delErr, "Failed to delete restore with FailedValidation")
+						return false, "", delErr
+					}
+					// Return true for mustwait to trigger requeue without changing status
+					return true, fmt.Sprintf(
+						"Deleted restore %s with FailedValidation, will recreate on next reconcile",
+						existingRestore.Name,
+					), nil
+				}
+
+				// Update status to track the attempted restore name for all cases (including AlreadyExists)
+				switch key {
+				case Credentials, CredentialsHive, CredentialsCluster:
+					restore.Status.VeleroCredentialsRestoreName = veleroRestoresToCreate[key].Name
+				case ResourcesGeneric:
+					restore.Status.VeleroGenericResourcesRestoreName = veleroRestoresToCreate[key].Name
+				case Resources:
+					restore.Status.VeleroResourcesRestoreName = veleroRestoresToCreate[key].Name
+				case ManagedClusters:
+					restore.Status.VeleroManagedClustersRestoreName = veleroRestoresToCreate[key].Name
+				}
 			}
 		} else {
 			newVeleroRestoreCreated = true
