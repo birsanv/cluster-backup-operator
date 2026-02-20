@@ -83,7 +83,6 @@ func main() {
 	var metricsAddr string
 	var probeAddr string
 	var enableLeaderElection bool
-	var enableWebhooks bool
 	var leaseDuration time.Duration
 	var renewDeadline time.Duration
 	var retryPeriod time.Duration
@@ -100,12 +99,9 @@ func main() {
 		":8081",
 		"The address the probe endpoint binds to.",
 	)
-	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
+	flag.BoolVar(&enableLeaderElection, "leader-elect", true,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
-	flag.BoolVar(&enableWebhooks, "enable-webhooks", true,
-		"Enable webhooks for validation. "+
-			"Disable this when running locally outside of a cluster.")
 	flag.DurationVar(&leaseDuration, "leader-election-lease-duration", 137*time.Second, ""+
 		"The duration that non-leader candidates will wait after observing a leadership "+
 		"renewal until attempting to acquire leadership of a led but unrenewed leader "+
@@ -134,31 +130,21 @@ func main() {
 		"renewDeadline", renewDeadline,
 		"retryPeriod", retryPeriod)
 
-	// Configure manager options
-	mgrOptions := ctrl.Options{
+	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme: scheme,
 		Metrics: metricsserver.Options{
 			BindAddress: metricsAddr,
 		},
+		WebhookServer: webhook.NewServer(webhook.Options{
+			Port: 9443,
+		}),
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "58497677.cluster.management.io",
 		LeaseDuration:          &leaseDuration,
 		RenewDeadline:          &renewDeadline,
 		RetryPeriod:            &retryPeriod,
-	}
-
-	// Only configure webhook server if webhooks are enabled
-	if enableWebhooks {
-		mgrOptions.WebhookServer = webhook.NewServer(webhook.Options{
-			Port: 9443,
-		})
-		setupLog.Info("Webhook server configured", "port", 9443)
-	} else {
-		setupLog.Info("Webhook server disabled for local development")
-	}
-
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), mgrOptions)
+	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)
@@ -232,14 +218,9 @@ func main() {
 	}
 
 	// Setup webhook for Restore validation
-	if enableWebhooks {
-		if err = (&backupv1beta1.Restore{}).SetupWebhookWithManager(mgr); err != nil {
-			setupLog.Error(err, "unable to create webhook", "webhook", "Restore")
-			os.Exit(1)
-		}
-		setupLog.Info("Webhooks enabled")
-	} else {
-		setupLog.Info("Webhooks disabled - running in local development mode")
+	if err = (&backupv1beta1.Restore{}).SetupWebhookWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create webhook", "webhook", "Restore")
+		os.Exit(1)
 	}
 	//+kubebuilder:scaffold:builder
 
