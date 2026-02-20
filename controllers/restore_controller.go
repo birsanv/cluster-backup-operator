@@ -257,7 +257,7 @@ func (r *RestoreReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	initRestoreCond := len(veleroRestoreList.Items) == 0 || sync
 
 	if initRestoreCond || isPVCStep {
-		mustwait, waitmsg, err := r.initVeleroRestores(ctx, restore, sync)
+		mustwait, waitmsg, err := r.initVeleroRestores(ctx, restore, sync, &veleroRestoreList)
 		if err != nil {
 			msg := fmt.Sprintf(
 				"unable to initialize Velero restores for restore %s/%s: %v",
@@ -602,6 +602,36 @@ func (backups mostRecent) Less(i, j int) bool {
 	return backups[j].Status.StartTimestamp.Before(backups[i].Status.StartTimestamp)
 }
 
+// areTrackedRestoresMissing checks if any tracked Velero restore is missing from the cluster
+func areTrackedRestoresMissing(
+	restore *v1beta1.Restore,
+	veleroRestoreList *veleroapi.RestoreList,
+) bool {
+	if veleroRestoreList == nil {
+		return true
+	}
+
+	existingRestores := make(map[string]bool)
+	for i := range veleroRestoreList.Items {
+		existingRestores[veleroRestoreList.Items[i].Name] = true
+	}
+
+	trackedNames := []string{
+		restore.Status.VeleroManagedClustersRestoreName,
+		restore.Status.VeleroResourcesRestoreName,
+		restore.Status.VeleroGenericResourcesRestoreName,
+		restore.Status.VeleroCredentialsRestoreName,
+	}
+
+	for _, name := range trackedNames {
+		if name != "" && !existingRestores[name] {
+			return true
+		}
+	}
+
+	return false
+}
+
 // create velero.io.Restore resource for each resource type
 //
 //nolint:funlen
@@ -609,13 +639,16 @@ func (r *RestoreReconciler) initVeleroRestores(
 	ctx context.Context,
 	restore *v1beta1.Restore,
 	sync bool,
+	veleroRestoreList *veleroapi.RestoreList,
 ) (bool, string, error) {
 	restoreLogger := log.FromContext(ctx)
 
 	restoreOnlyManagedClusters := false
 	if sync {
-		if isNewBackupAvailable(ctx, r.Client, restore, Resources) ||
-			isNewBackupAvailable(ctx, r.Client, restore, Credentials) {
+		newBackupsAvailable := isNewBackupAvailable(ctx, r.Client, restore, Resources) ||
+			isNewBackupAvailable(ctx, r.Client, restore, Credentials)
+
+		if newBackupsAvailable {
 			restoreLogger.Info(
 				"new backups available to sync with for this restore",
 				"name", restore.Name,
@@ -627,7 +660,16 @@ func (r *RestoreReconciler) initVeleroRestores(
 			// allow that now
 			restoreOnlyManagedClusters = true
 		} else {
-			return false, "", nil
+			// check if any tracked restore is missing from the cluster
+			trackedRestoresMissing := areTrackedRestoresMissing(restore, veleroRestoreList)
+			if !trackedRestoresMissing {
+				return false, "", nil
+			}
+			restoreLogger.Info(
+				"tracked Velero restore(s) missing, will recreate",
+				"name", restore.Name,
+				"namespace", restore.Namespace,
+			)
 		}
 	}
 
